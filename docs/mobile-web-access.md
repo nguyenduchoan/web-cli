@@ -26,6 +26,12 @@ Mỗi mã khôi phục chỉ dùng một lần, cùng mật khẩu. Bản hiện
 diện đổi mật khẩu hoặc ghép lại 2FA; trường hợp mất cả mã khôi phục cần chủ máy
 thực hiện quy trình phục hồi tài khoản trực tiếp trên máy chủ.
 
+Sau lần đăng nhập đầy đủ, trình duyệt được ghi nhớ trong tối đa 180 ngày bằng
+một cookie HttpOnly riêng. Những lần sau trên đúng trình duyệt chỉ cần mã 2FA;
+máy hoặc trình duyệt khác không có cookie này vẫn phải nhập tài khoản và mật
+khẩu. Xóa cookie trình duyệt hoặc đăng nhập ở chế độ riêng tư sẽ được xem như
+thiết bị mới.
+
 ## Thao tác trên điện thoại
 
 - “Phiên & dự án” mở bảng chọn thư mục, terminal thông thường hoặc AI.

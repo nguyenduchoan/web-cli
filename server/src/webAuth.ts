@@ -10,13 +10,15 @@ import type { AppConfig } from "./config.js";
 
 const derivePassword = (password: string, salt: string) => new Promise<Buffer>((resolve, reject) => crypto.scrypt(password, salt, 64, { N: 131072, r: 8, p: 1, maxmem: 256 * 1024 * 1024 }, (error, result) => error ? reject(error) : resolve(result)));
 const COOKIE = "web_cli_session";
+const DEVICE_COOKIE = "web_cli_device";
 const MAX_AGE = 12 * 60 * 60 * 1000;
 const IDLE_AGE = 30 * 60 * 1000;
+const DEVICE_MAX_AGE = 180 * 24 * 60 * 60 * 1000;
 const digest = (value: string) => crypto.createHash("sha256").update(value).digest("hex");
 const equal = (a: string, b: string) => crypto.timingSafeEqual(Buffer.from(digest(a)), Buffer.from(digest(b)));
 const setupSchema = z.object({ setupCode: z.string().max(128), username: z.string().regex(/^[a-zA-Z0-9_.-]{3,40}$/), password: z.string().min(12).max(256) });
-const loginSchema = z.object({ username: z.string().max(40), password: z.string().max(256), code: z.string().max(40) });
-type Credential = { username: string; salt: string; passwordHash: string; secret: string; lastCounter: number; recovery: string[] };
+const loginSchema = z.object({ username: z.string().max(40).optional(), password: z.string().max(256).optional(), code: z.string().max(40) });
+type Credential = { username: string; salt: string; passwordHash: string; secret: string; lastCounter: number; recovery: string[]; devices?: string[] };
 type LoginSession = { expiresAt: number; lastSeen: number };
 type Pending = { id: string; credential: Credential; expiresAt: number };
 
@@ -59,10 +61,19 @@ export class WebAuth {
   }
 
   sessionKey(request: Pick<IncomingMessage, "headers">): string | undefined {
-    const cookies = (request.headers.cookie ?? "").split(";").map((part) => part.trim()).filter((part) => part.startsWith(COOKIE + "="));
-    if (cookies.length !== 1) return undefined;
-    const token = cookies[0].slice(COOKIE.length + 1);
+    const token = this.cookie(request, COOKIE);
+    if (!token) return undefined;
     return /^[A-Za-z0-9_-]{43}$/.test(token) ? digest(token) : undefined;
+  }
+
+  private cookie(request: Pick<IncomingMessage, "headers">, name: string): string | undefined {
+    const value = (request.headers.cookie ?? "").split(";").map((part) => part.trim()).find((part) => part.startsWith(name + "="));
+    return value?.slice(name.length + 1);
+  }
+
+  trustedDevice(request: Pick<IncomingMessage, "headers">): boolean {
+    const token = this.cookie(request, DEVICE_COOKIE);
+    return Boolean(token && /^[A-Za-z0-9_-]{43}$/.test(token) && this.credential?.devices?.includes(digest(token)));
   }
 
   valid(key: string | undefined, touch = false): boolean {
@@ -87,9 +98,11 @@ export class WebAuth {
     return /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(request.headers.host ?? "");
   }
 
-  private setCookie(reply: FastifyReply, request: FastifyRequest, token: string, clear = false): void {
+  private setCookies(reply: FastifyReply, request: FastifyRequest, sessionToken: string, deviceToken?: string, clear = false): void {
     const secure = request.protocol === "https";
-    reply.header("Set-Cookie", `${COOKIE}=${token}; Path=/api/web-cli/; HttpOnly; SameSite=Strict; Max-Age=${clear ? 0 : MAX_AGE / 1000}${secure ? "; Secure" : ""}`);
+    const cookies = [`${COOKIE}=${sessionToken}; Path=/api/web-cli/; HttpOnly; SameSite=Strict; Max-Age=${clear ? 0 : MAX_AGE / 1000}${secure ? "; Secure" : ""}`];
+    if (deviceToken) cookies.push(`${DEVICE_COOKIE}=${deviceToken}; Path=/api/web-cli/; HttpOnly; SameSite=Strict; Max-Age=${clear ? 0 : DEVICE_MAX_AGE / 1000}${secure ? "; Secure" : ""}`);
+    reply.header("Set-Cookie", cookies);
   }
 
   private openSession(reply: FastifyReply, request: FastifyRequest): void {
@@ -97,7 +110,12 @@ export class WebAuth {
     while (this.sessions.size >= 8) this.sessions.delete(this.sessions.keys().next().value!);
     const token = crypto.randomBytes(32).toString("base64url");
     this.sessions.set(digest(token), { expiresAt: Date.now() + MAX_AGE, lastSeen: Date.now() });
-    this.setCookie(reply, request, token);
+    const deviceToken = crypto.randomBytes(32).toString("base64url");
+    if (this.credential) {
+      this.credential.devices = [...new Set([...(this.credential.devices ?? []), digest(deviceToken)])].slice(-8);
+      this.save(this.credential);
+    }
+    this.setCookies(reply, request, token, deviceToken);
   }
 
   private consumeCode(credential: Credential, code: string): Credential | undefined {
@@ -137,7 +155,7 @@ export class WebAuth {
       if (!this.valid(this.sessionKey(request.raw), true)) return reply.code(401).send({ message: "Vui lòng đăng nhập lại bằng mật khẩu và mã 2FA." });
     });
 
-    app.get("/api/auth/status", async (request) => ({ setupRequired: !this.credential, authenticated: this.valid(this.sessionKey(request.raw)), username: this.valid(this.sessionKey(request.raw)) ? this.credential?.username : undefined }));
+    app.get("/api/auth/status", async (request) => ({ setupRequired: !this.credential, authenticated: this.valid(this.sessionKey(request.raw)), trustedDevice: this.trustedDevice(request.raw), username: this.valid(this.sessionKey(request.raw)) ? this.credential?.username : undefined }));
 
     app.post("/api/auth/setup", async (request, reply) => {
       const parsed = setupSchema.safeParse(request.body);
@@ -149,7 +167,7 @@ export class WebAuth {
         const salt = crypto.randomBytes(16).toString("hex");
         const passwordHash = (await derivePassword(password, salt) as Buffer).toString("hex");
         const secret = new Secret({ size: 20 }).base32;
-        const credential = { username, salt, passwordHash, secret, lastCounter: -1, recovery: [] };
+        const credential = { username, salt, passwordHash, secret, lastCounter: -1, recovery: [], devices: [] };
         const id = crypto.randomBytes(32).toString("base64url");
         const uri = makeTotp(secret, username).toString();
         const qr = await QRCode.toDataURL(uri, { width: 240, margin: 2 });
@@ -180,8 +198,11 @@ export class WebAuth {
       this.working = true;
       try {
         const current = this.credential;
-        const hash = (await derivePassword(parsed.data.password, current.salt) as Buffer).toString("hex");
-        if (!equal(hash, current.passwordHash) || !equal(parsed.data.username, current.username)) return reply.code(401).send({ message: "Tài khoản, mật khẩu hoặc mã xác thực không đúng." });
+        if (!this.trustedDevice(request.raw)) {
+          if (!parsed.data.password || !parsed.data.username) return reply.code(401).send({ message: "Thiết bị mới cần nhập tài khoản và mật khẩu đầy đủ." });
+          const hash = (await derivePassword(parsed.data.password, current.salt) as Buffer).toString("hex");
+          if (!equal(hash, current.passwordHash) || !equal(parsed.data.username, current.username)) return reply.code(401).send({ message: "Tài khoản, mật khẩu hoặc mã xác thực không đúng." });
+        }
         const next = this.consumeCode(current, parsed.data.code.trim());
         if (!next) return reply.code(401).send({ message: "Tài khoản, mật khẩu hoặc mã xác thực không đúng. Nếu vừa dùng mã này, hãy đợi mã mới." });
         this.save(next);
@@ -193,7 +214,7 @@ export class WebAuth {
     app.post("/api/auth/logout", async (request, reply) => {
       const key = this.sessionKey(request.raw);
       if (key) this.sessions.delete(key);
-      this.setCookie(reply, request, "", true);
+      this.setCookies(reply, request, "", undefined, true);
       return { ok: true };
     });
     app.addHook("onClose", async () => { this.sessions.clear(); this.pending = undefined; });

@@ -84,7 +84,7 @@ export default function App() {
     catch { showError("Trình duyệt chưa cho phép sao chép. Hãy mở trang bằng HTTPS."); }
   }
   if (!auth) return <main className="login-page"><div className="login-card"><h1 className="text-xl">Web CLI</h1><p className="mt-3">{error || "Đang kiểm tra đăng nhập…"}</p>{error && <button className="primary mt-4" onClick={() => void load().catch((err) => showError(err.message))}>Thử lại</button>}</div></main>;
-  if (!auth.authenticated) return <LoginScreen setupRequired={auth.setupRequired} onLogin={load} error={error} />;
+  if (!auth.authenticated) return <LoginScreen setupRequired={auth.setupRequired} trustedDevice={auth.trustedDevice} onLogin={load} error={error} />;
   const usable = session?.state === "running" && connected;
   return <main className="controller">
     <header className="controller-header">

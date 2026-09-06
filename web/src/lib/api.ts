@@ -38,10 +38,10 @@ export function health(token: string) {
   return request<{ ok: boolean }>("/api/health", token);
 }
 
-export type AuthStatus = { authenticated: boolean; setupRequired: boolean; username?: string };
+export type AuthStatus = { authenticated: boolean; setupRequired: boolean; trustedDevice?: boolean; username?: string };
 export type Enrollment = { enrollmentId: string; secret: string; uri: string; qr: string };
 export const authStatus = () => request<AuthStatus>("/api/auth/status", "");
-export const login = (username: string, password: string, code: string) => request("/api/auth/login", "", { method: "POST", body: JSON.stringify({ username, password, code }) });
+export const login = (username: string, password: string, code: string) => request("/api/auth/login", "", { method: "POST", body: JSON.stringify({ username: username || undefined, password: password || undefined, code }) });
 export const logout = () => request("/api/auth/logout", "", { method: "POST", body: "{}" });
 export const beginSetup = (setupCode: string, username: string, password: string) => request<Enrollment>("/api/auth/setup", "", { method: "POST", body: JSON.stringify({ setupCode, username, password }) });
 export const confirmSetup = (enrollmentId: string, code: string) => request<{ recoveryCodes: string[] }>("/api/auth/setup/confirm", "", { method: "POST", body: JSON.stringify({ enrollmentId, code }) });

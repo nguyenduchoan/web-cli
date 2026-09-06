@@ -1,8 +1,8 @@
 import { FormEvent, useState } from "react";
 import { beginSetup, confirmSetup, login, type Enrollment } from "../lib/api";
 
-type Props = { setupRequired: boolean; onLogin: () => Promise<void>; error?: string };
-export function LoginScreen({ setupRequired, onLogin, error }: Props) {
+type Props = { setupRequired: boolean; trustedDevice?: boolean; onLogin: () => Promise<void>; error?: string };
+export function LoginScreen({ setupRequired, trustedDevice, onLogin, error }: Props) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -37,7 +37,7 @@ export function LoginScreen({ setupRequired, onLogin, error }: Props) {
     <form onSubmit={submit} className="login-card">
       <p className="text-sm font-semibold text-signal-400">MÁY CHỦ CỦA BẠN</p>
       <h1 className="mt-2 text-2xl font-semibold">Web CLI</h1>
-      <p className="mt-2 text-sm text-zinc-300">{recoveryCodes ? "Lưu các mã khôi phục trước khi tiếp tục. Mỗi mã dùng được một lần nếu mất ứng dụng xác thực." : enrollment ? "Thêm Web CLI vào ứng dụng xác thực, rồi nhập mã sáu số để hoàn tất." : setupRequired ? "Tạo tài khoản chủ máy và bật xác thực hai bước (2FA). Đây là bước thiết lập một lần." : "Đăng nhập bằng mật khẩu và mã xác thực hai bước (2FA)."}</p>
+      <p className="mt-2 text-sm text-zinc-300">{recoveryCodes ? "Lưu các mã khôi phục trước khi tiếp tục. Mỗi mã dùng được một lần nếu mất ứng dụng xác thực." : enrollment ? "Thêm Web CLI vào ứng dụng xác thực, rồi nhập mã sáu số để hoàn tất." : setupRequired ? "Tạo tài khoản chủ máy và bật xác thực hai bước (2FA). Đây là bước thiết lập một lần." : trustedDevice ? "Thiết bị này đã được ghi nhớ. Chỉ cần nhập mã xác thực hai bước (2FA)." : "Đăng nhập bằng tài khoản, mật khẩu và mã xác thực hai bước (2FA)."}</p>
       {recoveryCodes ? <>
         <pre className="my-4 select-all overflow-x-auto rounded bg-black/50 p-3 text-sm">{recoveryCodes.join("\n")}</pre>
         <button type="button" className="control w-full" onClick={downloadRecovery}>Tải mã khôi phục</button>
@@ -54,8 +54,8 @@ export function LoginScreen({ setupRequired, onLogin, error }: Props) {
             <input autoComplete="off" type="password" value={setupCode} onChange={(e) => setSetupCode(e.target.value)} required />
             <span className="text-xs font-normal text-zinc-400">Mã do chủ máy lấy từ tệp thiết lập riêng trên máy chủ.</span>
           </label>}
-          <label className="field-label">Tài khoản<input name="username" autoComplete="username" autoCapitalize="none" spellCheck={false} value={username} onChange={(e) => setUsername(e.target.value)} required pattern={setupRequired ? "[a-zA-Z0-9_.-]{3,40}" : undefined} maxLength={40} /></label>
-          <label className="field-label">Mật khẩu{setupRequired ? " (ít nhất 12 ký tự)" : ""}<input name="password" type="password" autoComplete={setupRequired ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} required minLength={setupRequired ? 12 : undefined} maxLength={256} /></label>
+          {(!trustedDevice || setupRequired) && <><label className="field-label">Tài khoản<input name="username" autoComplete="username" autoCapitalize="none" spellCheck={false} value={username} onChange={(e) => setUsername(e.target.value)} required pattern={setupRequired ? "[a-zA-Z0-9_.-]{3,40}" : undefined} maxLength={40} /></label>
+          <label className="field-label">Mật khẩu{setupRequired ? " (ít nhất 12 ký tự)" : ""}<input name="password" type="password" autoComplete={setupRequired ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} required minLength={setupRequired ? 12 : undefined} maxLength={256} /></label></>}
         </>}
         {(!setupRequired || enrollment) && <label className="field-label">{recoveryMode ? "Mã khôi phục" : "Mã xác thực sáu số"}<input name="code" inputMode={recoveryMode ? "text" : "numeric"} autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)} required pattern={recoveryMode ? undefined : "[0-9]{6}"} maxLength={recoveryMode ? 40 : 6} /></label>}
         {!setupRequired && <button type="button" className="mt-2 min-h-11 text-sm text-signal-400" onClick={() => { setRecoveryMode(!recoveryMode); setCode(""); }}>{recoveryMode ? "Dùng mã từ ứng dụng" : "Tôi cần dùng mã khôi phục"}</button>}
