@@ -1,0 +1,159 @@
+kit_name: agile-product-agent-kit
+version: 1.0.0
+language: vi-VN
+delivery_model:
+  primary: Scrum
+  supported:
+    - Scrum
+    - Kanban
+    - Dual-track Agile
+    - Shape Up inspired discovery
+principles:
+  - Outcome trước output.
+  - Requirement phải kiểm thử được.
+  - Thiết kế phải nêu rõ trade-off, rủi ro, rollback.
+  - Code phải có bảo mật, performance, observability và test phù hợp.
+  - Release phải có owner, monitoring và kế hoạch rollback.
+agents:
+  product_team_orchestrator:
+    file: agents/00-product-team-orchestrator.md
+    owns:
+      - task routing
+      - workflow governance
+      - cross-role handoff
+      - quality gate enforcement
+    outputs:
+      - role assignment
+      - missing information list
+      - delivery plan
+  product_manager:
+    file: agents/01-product-manager.md
+    owns:
+      - product vision
+      - product outcome
+      - roadmap
+      - prioritization
+      - stakeholder alignment
+    outputs:
+      - product brief
+      - PRD
+      - success metrics
+  business_analyst:
+    file: agents/02-business-analyst.md
+    owns:
+      - requirement elicitation
+      - user story
+      - acceptance criteria
+      - process rules
+      - traceability
+    outputs:
+      - story map
+      - refined user stories
+      - business rules
+  solution_architect:
+    file: agents/03-solution-architect.md
+    owns:
+      - architecture
+      - NFR
+      - integration
+      - data flow
+      - technical risk
+    outputs:
+      - solution design
+      - ADR
+      - API and integration contracts
+  backend_engineer:
+    file: agents/04-backend-engineer.md
+    owns:
+      - backend implementation
+      - API
+      - persistence
+      - async processing
+      - backend tests
+    outputs:
+      - implementation plan
+      - code changes
+      - test evidence
+  frontend_engineer:
+    file: agents/05-frontend-engineer.md
+    owns:
+      - frontend implementation
+      - UI state
+      - accessibility
+      - client performance
+      - frontend tests
+    outputs:
+      - UI implementation plan
+      - code changes
+      - visual and test evidence
+  quality_engineer:
+    file: agents/06-quality-engineer.md
+    owns:
+      - test strategy
+      - test cases
+      - automation
+      - regression
+      - release quality evidence
+    outputs:
+      - test plan
+      - test cases
+      - bug reports
+      - test summary
+  scrum_master:
+    file: agents/07-scrum-master.md
+    owns:
+      - ceremonies
+      - team flow
+      - impediment removal
+      - agile metrics
+    outputs:
+      - sprint plan
+      - retro actions
+      - flow health report
+  ux_ui_designer:
+    file: agents/08-ux-ui-designer.md
+    owns:
+      - user journey
+      - information architecture
+      - interaction design
+      - design system alignment
+      - usability
+    outputs:
+      - UX flow
+      - wireframe spec
+      - UI acceptance notes
+  devops_sre:
+    file: agents/09-devops-sre.md
+    owns:
+      - CI/CD
+      - deployment
+      - infrastructure
+      - reliability
+      - monitoring
+    outputs:
+      - deployment plan
+      - SLO and alert plan
+      - rollback plan
+  security_reviewer:
+    file: agents/10-security-reviewer.md
+    owns:
+      - threat modeling
+      - secure design review
+      - security testing guidance
+      - compliance risks
+    outputs:
+      - threat model
+      - security review findings
+      - mitigation plan
+  data_analyst:
+    file: agents/11-data-analyst.md
+    owns:
+      - product metrics
+      - event tracking
+      - experiment analysis
+      - dashboard requirements
+    outputs:
+      - metric tree
+      - tracking plan
+      - experiment readout
+

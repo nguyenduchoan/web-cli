@@ -1,0 +1,19 @@
+node_modules/
+dist/
+web/dist/
+server/dist/
+.env
+.env.*
+!.env.example
+*.log
+*.sqlite
+*.sqlite3
+*.db
+secrets/
+web-cli.zip
+
+# Local editor and OS files
+.DS_Store
+.idea/
+.vscode/
+.claude/settings.local.json

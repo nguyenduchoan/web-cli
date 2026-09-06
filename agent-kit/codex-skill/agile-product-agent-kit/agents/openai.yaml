@@ -1,0 +1,5 @@
+interface:
+  display_name: "Agile Product Agent Kit"
+  short_description: "Production Agile roles, gates, and delivery workflows"
+  default_prompt: "Use $agile-product-agent-kit to route this request through the right product, engineering, QA, security, and release roles with production-ready quality gates."
+

@@ -1,0 +1,21 @@
+{
+  "name": "agent-cli-web-controller",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "npm --workspace server run dev",
+    "dev:server": "npm --workspace server run dev",
+    "dev:web": "npm --workspace web run dev",
+    "build": "npm --workspace server run build && npm --workspace web run build",
+    "check": "npm --workspace server run check && npm --workspace web run check",
+    "test": "npm --workspace server run test"
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true,
+    "esbuild@0.27.2": true
+  }
+}
