@@ -8,6 +8,8 @@ export function installTerminalTouchScroll(terminal: Terminal, container: HTMLEl
   let velocity = 0;
   let lastFrame = 0;
   let owned = false;
+  let viewportY = terminal.buffer.active.viewportY;
+  let drawing = false;
   let touch: { id: number; y: number; time: number; rowHeight: number; moved: boolean } | undefined;
   const canScroll = () => document.visibilityState !== "hidden" && terminal.buffer.active.type === "normal" && terminal.modes.mouseTrackingMode === "none" && !terminal.hasSelection();
   const stop = () => { cancelAnimationFrame(frame); frame = 0; velocity = 0; touch = undefined; };
@@ -25,7 +27,10 @@ export function installTerminalTouchScroll(terminal: Terminal, container: HTMLEl
     if (bounded !== position) velocity = 0;
     position = bounded;
     const line = Math.round(position);
-    if (line !== terminal.buffer.active.viewportY) terminal.scrollToLine(line);
+    drawing = true;
+    try {
+      if (line !== terminal.buffer.active.viewportY) terminal.scrollToLine(line);
+    } finally { drawing = false; }
     if (!touch && Math.abs(velocity) > 0.002) frame = requestAnimationFrame(draw);
   };
   const schedule = () => { if (!frame) frame = requestAnimationFrame(draw); };
@@ -41,7 +46,7 @@ export function installTerminalTouchScroll(terminal: Terminal, container: HTMLEl
     const rowHeight = (screen?.clientHeight ?? 0) / terminal.rows;
     if (!rowHeight) { owned = false; return; }
     const point = event.touches[0];
-    position = terminal.buffer.active.viewportY;
+    position = viewportY = terminal.buffer.active.viewportY;
     touch = { id: point.identifier, y: point.clientY, time: performance.now(), rowHeight, moved: false };
     // Keep taps and long presses available, but avoid xterm's second touch scroller.
     event.stopPropagation();
@@ -88,19 +93,36 @@ export function installTerminalTouchScroll(terminal: Terminal, container: HTMLEl
   container.addEventListener("touchcancel", end, { capture: true, passive: false });
   container.addEventListener("wheel", stop, { passive: true });
   container.addEventListener("keydown", stop);
+  container.addEventListener("beforeinput", stop, true);
+  container.addEventListener("paste", stop, true);
   window.addEventListener("blur", stop);
   document.addEventListener("visibilitychange", stop);
-  const input = terminal.onData(stop);
-  const resize = terminal.onResize(stop);
+  // Output can remove old history lines while a finger is held or momentum is active.
+  // Follow xterm's adjusted viewport so the next frame cannot jump to stale line numbers.
+  const scroll = terminal.onScroll((next) => {
+    if (!drawing && (touch || frame)) position += next - viewportY;
+    viewportY = next;
+  });
+  // onData includes automatic status/cursor replies, so it must not cancel a gesture.
+  // Actual typing/paste is handled by DOM events and the command input's stop callback.
+  const resize = terminal.onResize(() => {
+    if (!touch) { stop(); return; }
+    const rowHeight = (container.querySelector<HTMLElement>(".xterm-screen")?.clientHeight ?? 0) / terminal.rows;
+    if (rowHeight > 0) touch.rowHeight = rowHeight;
+    position = viewportY = terminal.buffer.active.viewportY;
+    velocity = 0;
+  });
   const buffer = terminal.buffer.onBufferChange(stop);
   return { stop, dispose: () => {
-    stop(); input.dispose(); resize.dispose(); buffer.dispose();
+    stop(); scroll.dispose(); resize.dispose(); buffer.dispose();
     container.removeEventListener("touchstart", start, true);
     container.removeEventListener("touchmove", move, true);
     container.removeEventListener("touchend", end, true);
     container.removeEventListener("touchcancel", end, true);
     container.removeEventListener("wheel", stop);
     container.removeEventListener("keydown", stop);
+    container.removeEventListener("beforeinput", stop, true);
+    container.removeEventListener("paste", stop, true);
     window.removeEventListener("blur", stop);
     document.removeEventListener("visibilitychange", stop);
   } };
