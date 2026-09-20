@@ -2175,4 +2175,48 @@ Conflict:
 
 # 21. FINAL NOTE TO CODING AGENT
 
-Không được tối ưu “cho nhanh” bằng cách bỏ qua các race conditions trong t
+Không được tối ưu “cho nhanh” bằng cách bỏ qua các race conditions trong tài liệu này.
+
+Các bug được yêu cầu sửa ở đây không phải lỗi cosmetic; chúng chủ yếu là:
+
+- asynchronous ordering,
+- stale callbacks,
+- terminal state correctness,
+- bounded memory,
+- reconnect lifecycle,
+- canonical identity,
+- auth lifecycle.
+
+Đây là nhóm lỗi rất dễ “test xanh” nếu test chỉ chạy happy path.
+
+Vì vậy mỗi fix phải đi cùng **một test có khả năng fail trên implementation cũ và pass trên implementation mới**.
+
+Nếu một test mới cũng pass trên code cũ, test đó chưa chứng minh bug đã được bắt; hãy sửa test cho tới khi nó thật sự cover failure mode.
+
+**Ưu tiên thực hiện:**
+
+```text
+Phase 1
+↓
+Phase 2
+↓
+Phase 3
+↓
+Phase 4
+↓
+Phase 5
+↓
+Phase 6
+↓
+Phase 7
+↓
+Phase 8
+↓
+Phase 9
+↓
+Phase 10
+↓
+Final validation
+```
+
+Không đổi thứ tự Phase 2/3/4 vì terminal synchronization, bounded queue và reconnect lifecycle liên quan trực tiếp với nhau.
