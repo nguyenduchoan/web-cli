@@ -471,3 +471,387 @@ Sau sync complete:
 - `seq > appliedSeq + 1`: gap -> block input + close/reconnect.
 
 Không được apply out-of-order.
+
+## 4.9 Test bắt buộc Phase 2
+
+Thêm test hoặc browser test cho ít nhất:
+
+### T2.1 Controller snapshot geometry
+
+```text
+server snapshot 100x30
+client xterm trước đó 80x24
+attach controller
+=> snapshot restore ở 100x30 trước khi fit viewport
+```
+
+### T2.2 Input không bật sớm
+
+Dùng mock/delayed terminal write:
+
+```text
+snapshot_chunk write callback bị delay 100ms
+sync_end đến trước callback
+=> command input vẫn disabled
+=> callback hoàn tất
+=> mới connected/controller usable
+```
+
+### T2.3 Chunk gap
+
+```text
+chunk index 0
+chunk index 2
+=> socket bị reconnect
+=> không đánh dấu sync complete
+```
+
+### T2.4 Chunk count mismatch
+
+```text
+sync_end.chunkCount = 3
+nhưng nhận 2 chunks
+=> reconnect
+```
+
+### T2.5 Session switch late write
+
+```text
+A chunk write callback pending
+switch B
+A callback finish
+=> terminal B không bị state của A ghi đè
+=> connection B không đổi sai
+```
+
+### T2.6 Mode restore
+
+Nếu có thể kiểm thử xterm trực tiếp:
+
+```text
+snapshot bật bracketed paste mode
+sync complete
+=> terminal.modes.bracketedPasteMode === true
+=> send multiline dùng bracketed paste
+```
+
+## 4.10 Gate Phase 2
+
+Không được PASS nếu chỉ test text output.
+
+Phải chứng minh:
+
+- geometry đúng,
+- callback sequencing đúng,
+- input gate đúng,
+- stale generation không can thiệp session mới.
+
+---
+
+# 5. PHASE 3 — BOUND WEBSOCKET V2 LIVE QUEUE DURING SYNC
+
+## 5.1 Vấn đề
+
+Trong `server/src/websocket.ts`, khi `clientRecord.syncComplete === false`:
+
+```ts
+clientRecord.liveQueue.push(msg)
+```
+
+Queue này chưa đi qua `ws.bufferedAmount`, vì chưa send.
+
+Nếu PTY output nhanh hơn snapshot transfer, RAM có thể tăng không giới hạn.
+
+## 5.2 File sửa
+
+```text
+server/src/websocket.ts
+server/test/websocket.test.ts
+```
+
+Có thể thêm type helper.
+
+## 5.3 Data structure bắt buộc
+
+Thêm accounting:
+
+```ts
+type AttachedClient = {
+  ...
+  liveQueue: Array<Record<string, unknown>>;
+  liveQueueBytes: number;
+  ...
+};
+```
+
+Khởi tạo:
+
+```ts
+liveQueue: [],
+liveQueueBytes: 0,
+```
+
+## 5.4 Hàm enqueue riêng
+
+Không copy-paste logic ở output/state/resize/attention.
+
+Tạo helper kiểu:
+
+```ts
+private queueOrSend(
+  client: AttachedClient,
+  payload: Record<string, unknown>
+): boolean
+```
+
+Hoặc local helper trong attach.
+
+Semantics:
+
+```text
+Nếu syncComplete:
+  sendJson(payload)
+
+Nếu chưa sync:
+  estimate serialized bytes
+  nếu liveQueueBytes + bytes > maxWebsocketBufferedBytes:
+      close 1013
+      không enqueue
+      return false
+  enqueue
+  tăng bytes
+```
+
+Byte size phải tính bằng UTF-8:
+
+```ts
+Buffer.byteLength(JSON.stringify(payload), "utf8")
+```
+
+Không dùng `payload.data.length`.
+
+## 5.5 Khi drain
+
+Sau snapshot:
+
+```text
+copy queue hiện tại
+set liveQueue=[]
+set liveQueueBytes=0
+drain theo thứ tự
+```
+
+Nếu `sendJson` fail/close thì stop drain.
+
+Không giữ queue cũ sau close.
+
+## 5.6 Cleanup
+
+Trong `cleanup()` bắt buộc:
+
+```ts
+clientRecord.liveQueue = [];
+clientRecord.liveQueueBytes = 0;
+```
+
+## 5.7 Không pause PTY vì một client chậm
+
+Rất quan trọng:
+
+- Không gọi `pty.pause()` chỉ vì một browser sync chậm.
+- Slow client phải bị drop/reconnect.
+- PTY của session vẫn chạy.
+- Viewer khác vẫn nhận output.
+
+## 5.8 Test bắt buộc
+
+### WQ1 — queue bounded
+
+Set test config:
+
+```text
+MAX_WS_BUFFERED_BYTES = nhỏ, ví dụ 1024
+```
+
+Trong lúc snapshot chưa complete, phát output > limit.
+
+Expect:
+
+```text
+socket closes code 1013
+live queue không tiếp tục tăng
+session vẫn running
+```
+
+### WQ2 — client khác không bị ảnh hưởng
+
+```text
+controller slow sync -> 1013
+viewer/another valid client remains connected
+PTY remains running
+```
+
+### WQ3 — normal small backlog
+
+```text
+queue dưới limit
+sync_end
+drain operations seq > baseSeq đúng thứ tự
+```
+
+### WQ4 — Unicode byte accounting
+
+Payload chứa nhiều Unicode/emoji.
+
+Assert byte limit dựa UTF-8 chứ không phải JS string length.
+
+## 5.9 Gate Phase 3
+
+PASS khi high-output sync không gây unbounded queue.
+
+---
+
+# 6. PHASE 4 — RECONNECT, MISSING SESSION VÀ CLOSE CODE
+
+## 6.1 Contract cần đạt
+
+Theo master contract:
+
+```text
+network/5xx/1013:
+  backoff 1s,2s,4s,8s,15s
+  tối đa 5 lần liên tiếp
+  sau đó dừng
+  hiện UI Nối lại
+
+session 404 / removed:
+  status = missing
+  stop retry
+  refresh session list một lần
+
+401/403:
+  stop retry
+  auth flow
+```
+
+## 6.2 File sửa
+
+```text
+web/src/components/TerminalPane.tsx
+web/src/features/sessions/useSessions.ts
+web/src/features/sessions/sessionReducer.ts
+web/src/App.tsx
+web/src/lib/api.ts
+```
+
+Có thể bổ sung callback mới từ TerminalPane:
+
+```ts
+onSessionMissing(sessionId)
+onReconnectExhausted(sessionId)
+```
+
+Nếu thêm callback phải type rõ.
+
+## 6.3 Retry counter
+
+Current logic không được retry vô hạn.
+
+Cần constant:
+
+```ts
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 15000];
+```
+
+Pseudo:
+
+```ts
+function scheduleReconnect() {
+  if (stopped) return;
+
+  if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+    setDisconnected();
+    return;
+  }
+
+  const base = RECONNECT_DELAYS[attempt];
+  attempt += 1;
+
+  timer = setTimeout(connect, base + jitter(base));
+}
+```
+
+`attempt = 0` chỉ reset khi **sync v2 hoàn tất thành công**, không reset chỉ vì WebSocket TCP `open`.
+
+Đây là điểm quan trọng.
+
+## 6.4 Handle 4004 Session Removed
+
+Backend đóng socket code:
+
+```text
+4004 Session removed
+```
+
+Frontend close handler phải:
+
+```text
+- stopped = true
+- no schedule reconnect
+- notify parent session missing
+- refresh list once
+```
+
+Không retry ticket vô hạn.
+
+## 6.5 Handle ticket API 404
+
+Nếu `createWsTicket()` throw `ApiError` với:
+
+```text
+status=404
+code=unknown_session
+```
+
+thì:
+
+```text
+- stop current attach
+- mark missing
+- refresh list once
+- không schedule reconnect
+```
+
+## 6.6 Handle 401/403
+
+401:
+
+- dispatch auth expired như hiện tại.
+- stop socket retry.
+
+403 permanent auth/origin:
+
+- stop automatic retry.
+- show error rõ.
+- không loop.
+
+## 6.7 Handle 1013
+
+1013 là retryable.
+
+Nhưng vẫn tính vào 5 attempts.
+
+## 6.8 Manual reconnect button
+
+`Nối lại` phải:
+
+```text
+- reset attempt counter
+- increment reconnectKey / generation
+- start new attach cycle
+```
+
+Không restart PTY.
+
+## 6.
