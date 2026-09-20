@@ -1217,4 +1217,162 @@ name = ""
 
 Hiện mobile sheet có thể đang `showModal()`, sau đó NewSessionDialog cũng `showModal()`.
 
-Phải đổi 
+Phải đổi flow.
+
+### Cách khuyến nghị
+
+Khi user bấm “+ Phiên mới” hoặc “+ Ở đây” trong mobile sheet:
+
+```text
+1. close mobile sheet
+2. sau close state/render, open NewSessionDialog
+```
+
+Khi Cancel New Session trên mobile:
+
+- có thể quay lại Session Manager sheet nếu flow được mở từ sheet.
+- hoặc trở về terminal nếu UX hiện tại chọn vậy.
+- nhưng tuyệt đối không để 2 modal cùng `open`.
+
+Nếu cần state:
+
+```ts
+const [returnToMobileSheetAfterNewDialog, setReturnToMobileSheetAfterNewDialog]
+```
+
+## 9.4 Focus
+
+Khi New Session đóng:
+
+- restore focus hợp lý.
+- không focus vào element đang nằm trong closed dialog.
+
+## 9.5 Test mobile
+
+Puppeteer:
+
+```text
+open mobile Session sheet
+click + Phiên mới
+assert document.querySelectorAll("dialog[open]").length === 1
+```
+
+Cancel:
+
+```text
+assert không có modal stacking
+assert focus hợp lý
+```
+
+Lặp lại với “+ Ở đây”.
+
+## 9.6 Regression
+
+Không làm hỏng desktop sidebar.
+
+---
+
+# 10. PHASE 8 — FCM / WEB PUSH LIFECYCLE HARDENING
+
+> Nếu owner chưa dùng FCM production, có thể giữ `FCM_ENABLED=false` trong lúc hoàn tất phase này.
+>
+> **Không được tuyên bố FCM production-ready trước khi phase này PASS.**
+
+## 10.1 Bug logout/re-login
+
+Current flow:
+
+```text
+registered device
+logout
+backend revoke device
+browser consent remains true
+login
+UI sees consent=true + Notification.permission=granted
+UI says registered
+backend has no device
+```
+
+## 10.2 Required behavior
+
+### Explicit logout success
+
+Sau `logout()` success:
+
+```text
+clear local push consent
+invalidate pending registration callbacks
+frontend state unregistered
+```
+
+Không cần revoke Firebase SDK trước logout nếu backend đã revoke scope, nhưng browser state phải không giả “registered”.
+
+### Login/app init
+
+Nếu:
+
+```text
+permission granted
+consent true
+```
+
+thì phải **refresh registration với backend** chứ không chỉ set label.
+
+Có 2 lựa chọn:
+
+### Option A — clear consent on logout
+
+Đơn giản và phù hợp security boundary:
+
+```text
+logout => clear consent
+login => UI "Chưa bật"
+user bật lại
+```
+
+### Option B — persistent user intent
+
+Nếu giữ consent qua logout:
+
+```text
+login => silently refresh SDK registration/server device
+chỉ set registered sau server 200
+```
+
+Master plan hiện thiên về refresh registration sau login. Nếu implement đúng được thì Option B tốt hơn.
+
+Không được giữ current broken behavior.
+
+## 10.3 Listener cleanup
+
+`onMessage()` và `onRegistered()` nếu SDK trả unsubscribe thì lưu và cleanup.
+
+Không attach foreground listener mới mỗi lần user bấm Enable.
+
+React mount/unmount và repeated enable phải không tạo duplicate banner.
+
+## 10.4 Fix PushStore auth scope delete
+
+File:
+
+```text
+server/src/pushStore.ts
+```
+
+Current code mismatch scope vẫn remove.
+
+Logic đúng:
+
+```ts
+this.cache.devices = this.cache.devices.filter((dev) => {
+  if (dev.deviceId !== deviceId) return true;
+
+  if (authScope && dev.webAuthScope !== authScope) {
+    return true; // KEEP mismatched device
+  }
+
+  return false; // delete matching device
+});
+```
+
+Nếu endpoint yêu cầu authScope luôn có thì có 
