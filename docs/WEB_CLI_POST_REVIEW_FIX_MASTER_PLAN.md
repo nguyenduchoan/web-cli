@@ -1810,3 +1810,187 @@ Sau automated PASS, thực hiện manual checklist.
 - Mở Session sheet.
 - Mở New Session.
 - Xác nhận chỉ có một modal.
+- Cancel.
+- Rotate landscape.
+- Switch session.
+- No horizontal page overflow.
+
+## 14.2 Two tabs
+
+Tab 1:
+
+```text
+Session A controller
+```
+
+Tab 2:
+
+```text
+Session A viewer
+```
+
+Verify:
+
+- viewer không input được,
+- viewer không resize PTY,
+- close Tab 1,
+- Tab 2 promoted,
+- Tab 2 input được,
+- không restart PTY.
+
+## 14.3 Network interruption
+
+- Start long-running command.
+- Cut transport.
+- UI disables input.
+- Restore network.
+- Snapshot restore.
+- Command state/output remains coherent.
+- Không double output.
+- Không gửi draft tự động.
+
+---
+
+# 15. PRODUCTION GATE
+
+Không deploy production nếu bất kỳ mục nào sau đây còn fail:
+
+```text
+[ ] Terminal snapshot callback sequencing
+[ ] Controller snapshot grid correctness
+[ ] WebSocket liveQueue bounded
+[ ] Reconnect max 5 + manual reconnect
+[ ] Removed/404 session stops retry
+[ ] API error code contract
+[ ] Canonical same-folder warning
+[ ] Mobile single-modal flow
+[ ] Draft/state prune
+[ ] Poll backoff ownership
+```
+
+Nếu `FCM_ENABLED=true`, thêm:
+
+```text
+[ ] FCM logout/relogin lifecycle
+[ ] PushStore auth-scope delete
+[ ] Listener cleanup
+[ ] Live FCM device test
+```
+
+Nếu FCM chưa hoàn tất, production env phải giữ:
+
+```bash
+FCM_ENABLED=false
+```
+
+và release note ghi rõ:
+
+```text
+Multi-session ready.
+FCM remains disabled pending production notification validation.
+```
+
+---
+
+# 16. THỨ TỰ COMMIT KHUYẾN NGHỊ
+
+Không gộp toàn bộ sửa lỗi vào một mega-commit mới.
+
+Khuyến nghị:
+
+```text
+fix(api): preserve backend error codes in ApiError
+
+fix(terminal): serialize snapshot restore before enabling input
+
+fix(ws): bound v2 sync live queue
+
+fix(session-ui): stop reconnect loop for missing sessions
+
+fix(session-state): prune stale drafts and repair polling backoff
+
+fix(session-create): use canonical working directory conflicts
+
+fix(mobile): avoid nested modal dialogs in session flow
+
+fix(push): repair device auth scope and logout registration lifecycle
+
+test(smoke): make browser tests reproducible
+
+ci: add clean build and test workflow
+```
+
+Mỗi commit phải build được nếu có thể.
+
+---
+
+# 17. VALIDATION REPORT FORMAT BẮT BUỘC
+
+Cập nhật hoặc tạo:
+
+```text
+docs/agile/changes/post-review-fix-validation.md
+```
+
+Format:
+
+```md
+# Post-review Fix Validation
+
+## Baseline
+
+- Base commit:
+- Final commit:
+- Node:
+- npm:
+- OS:
+- Chrome/Chromium:
+
+## Phase 1 — API Error Contract
+
+### Files changed
+- ...
+
+### Tests added
+- ...
+
+### Commands
+- `npm run check` — PASS/FAIL
+- ...
+
+### Result
+PASS/FAIL
+
+## Phase 2 — Terminal Snapshot
+...
+
+## Final Gate
+
+- npm run check:
+- npm run build:
+- npm test:
+- smoke-multi-session:
+- smoke-mobile:
+- smoke-notifications:
+- git diff --check:
+- CI URL/status:
+
+## Remaining limitations
+
+- Live FCM tested: YES/NO
+- iOS manual test: YES/NO
+- Any known blocker:
+```
+
+Không viết “PASS” nếu command chưa thật sự chạy.
+
+---
+
+# 18. DEFINITION OF DONE
+
+Task chỉ DONE khi:
+
+1. Tất cả P1/P2 ở đầu tài liệu đã được sửa.
+2. Test mới cover chính bug đã review, không chỉ happy path.
+3. `npm run check` PASS.
+4. `npm r
