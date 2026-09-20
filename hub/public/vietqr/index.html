@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#071b35" />
+    <title>VietQR Studio</title>
+    <link rel="stylesheet" href="/vietqr/styles.css?v=20260911-3" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <a class="brand" href="/"><span class="brand-mark">⌁</span><span>← Server Hub</span></a>
+        <span class="standard"><span class="dot"></span> NAPAS247 · v1.0</span>
+      </header>
+
+      <section class="intro">
+        <p class="eyebrow">CÔNG CỤ TẠO MÃ THANH TOÁN</p>
+        <h1>Một mã QR.<br /><span>Thanh toán dễ dàng.</span></h1>
+        <p class="lede">Tạo VietQR theo chuẩn NAPAS247, tùy biến logo và tải xuống trong vài giây.</p>
+      </section>
+
+      <section class="workspace">
+        <form id="qr-form" class="card form-card">
+          <div class="card-heading"><div><p class="section-kicker">01 / THÔNG TIN THANH TOÁN</p><h2>Thiết lập mã QR</h2></div><span class="required-note">* Bắt buộc</span></div>
+
+          <div class="segmented" role="group" aria-label="Loại định danh">
+            <button type="button" class="segment active" data-target="account">Tài khoản</button>
+            <button type="button" class="segment" data-target="card">Thẻ</button>
+          </div>
+          <input type="hidden" id="service" value="QRIBFTTA" />
+
+          <div class="field-grid">
+            <label class="field"><span>Ngân hàng thụ hưởng <b>*</b></span><select id="bin" required><option value="970436">Vietcombank</option><option value="970415">VietinBank</option><option value="970422">MBBank</option><option value="970418">BIDV</option><option value="970403">Sacombank</option><option value="970405">Agribank</option><option value="970432">VPBank</option><option value="970407">Techcombank</option><option value="970416">ACB</option><option value="970423">TPBank</option></select></label>
+            <label class="field"><span>Số tài khoản / số thẻ <b>*</b></span><input id="account" inputmode="numeric" maxlength="19" placeholder="Nhập số tài khoản" required /></label>
+          </div>
+
+          <div class="field-grid">
+            <label class="field"><span>Loại mã</span><select id="mode"><option value="11">QR tĩnh · dùng nhiều lần</option><option value="12">QR động · theo giao dịch</option></select></label>
+            <label class="field"><span>Số tiền <small>(tùy chọn)</small></span><div class="input-with-suffix"><input id="amount" inputmode="decimal" maxlength="13" placeholder="0" /><span>VND</span></div></label>
+          </div>
+          <label class="field"><span>Nội dung chuyển khoản <small>(tùy chọn)</small></span><input id="purpose" maxlength="25" placeholder="Ví dụ: Thanh toan don hang" /></label>
+
+          <div class="divider"></div>
+          <div class="card-heading compact"><div><p class="section-kicker">02 / HIỂN THỊ</p><h2>Thông tin người nhận</h2></div></div>
+          <div class="field-grid">
+            <label class="field"><span>Tên người nhận <small>(tùy chọn)</small></span><input id="merchant" maxlength="25" placeholder="NGUYEN VAN A" /></label>
+            <label class="field"><span>Thành phố <small>(tùy chọn)</small></span><input id="city" maxlength="15" value="" placeholder="HO CHI MINH" /></label>
+          </div>
+
+          <div class="logo-control">
+            <div class="logo-copy"><span class="upload-icon">↥</span><div><strong>Gắn logo vào mã QR</strong><p>PNG hoặc JPG · nên dùng ảnh vuông</p></div></div>
+            <label class="upload-button">Chọn ảnh<input id="logo" type="file" accept="image/png,image/jpeg,image/webp" /></label>
+          </div>
+          <div id="file-name" class="file-name" hidden></div>
+          <div id="error" class="error" role="alert" hidden></div>
+          <button class="primary-button" type="submit">Tạo mã QR <span>→</span></button>
+        </form>
+
+        <aside class="card preview-card">
+          <div class="card-heading"><div><p class="section-kicker">03 / XEM TRƯỚC</p><h2>Mã của bạn</h2></div><span class="live-badge"><span class="dot"></span> Sẵn sàng</span></div>
+          <div class="qr-stage"><div id="qr-output" aria-label="Mã QR xem trước"></div><div id="qr-empty" class="empty-state"><div class="empty-symbol">▦</div><p>Mã QR sẽ xuất hiện tại đây</p><small>Điền thông tin bên trái để bắt đầu</small></div></div>
+          <div id="preview-meta" class="preview-meta" hidden><strong id="preview-name">VietQR</strong><span id="preview-account"></span><span id="preview-amount"></span></div>
+          <button id="download" class="secondary-button" type="button" disabled>Tải mã QR xuống <span>↓</span></button>
+          <p class="hint">Mã được tạo trực tiếp trên trình duyệt của bạn.</p>
+        </aside>
+      </section>
+      <footer><span>Được xây dựng theo tài liệu định dạng VietQR · 09/2021</span><span class="mono">CRC-16 / CCITT</span></footer>
+    </main>
+    <script src="/vietqr/vendor/qrcode-1.5.4.min.js"></script>
+    <script src="/vietqr/payload.js?v=20260911-2"></script>
+    <script src="/vietqr/app.js?v=20260911-4"></script>
+  </body>
+</html>

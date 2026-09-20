@@ -7,6 +7,7 @@ import { z } from "zod";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { IncomingMessage } from "node:http";
 import type { AppConfig } from "./config.js";
+import type { HubAuth } from "./hubAuth.js";
 
 const derivePassword = (password: string, salt: string) => new Promise<Buffer>((resolve, reject) => crypto.scrypt(password, salt, 64, { N: 131072, r: 8, p: 1, maxmem: 256 * 1024 * 1024 }, (error, result) => error ? reject(error) : resolve(result)));
 const COOKIE = "web_cli_session";
@@ -19,7 +20,7 @@ const equal = (a: string, b: string) => crypto.timingSafeEqual(Buffer.from(diges
 const setupSchema = z.object({ setupCode: z.string().max(128), username: z.string().regex(/^[a-zA-Z0-9_.-]{3,40}$/), password: z.string().min(12).max(256) });
 const loginSchema = z.object({ username: z.string().max(40).optional(), password: z.string().max(256).optional(), code: z.string().max(40) });
 type Credential = { username: string; salt: string; passwordHash: string; secret: string; lastCounter: number; recovery: string[]; devices?: string[] };
-type LoginSession = { expiresAt: number; lastSeen: number };
+type LoginSession = { expiresAt: number; lastSeen: number; hubKey?: string };
 type Pending = { id: string; credential: Credential; expiresAt: number };
 
 export function makeTotp(secret: string, username = "owner"): TOTP {
@@ -35,8 +36,13 @@ export class WebAuth {
   private setupCode = "";
   private readonly credentialPath: string;
   private readonly setupPath: string;
+  private onLogoutHook?: (scope: string) => Promise<void> | void;
 
-  constructor(private readonly config: AppConfig) {
+  setOnLogout(hook: (scope: string) => Promise<void> | void): void {
+    this.onLogoutHook = hook;
+  }
+
+  constructor(private readonly config: AppConfig, private readonly hub?: HubAuth) {
     const dir = config.authDataDir ?? "/var/www/html/secrets/web-cli-auth";
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.chmodSync(dir, 0o700);
@@ -63,7 +69,19 @@ export class WebAuth {
   sessionKey(request: Pick<IncomingMessage, "headers">): string | undefined {
     const token = this.cookie(request, COOKIE);
     if (!token) return undefined;
-    return /^[A-Za-z0-9_-]{43}$/.test(token) ? digest(token) : undefined;
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return undefined;
+    const key = digest(token);
+    if (this.hub) {
+      const hubKey = this.hub.sessionKey(request);
+      if (!this.hub.valid(hubKey) || this.sessions.get(key)?.hubKey !== hubKey) return undefined;
+    }
+    return key;
+  }
+
+  getAuthScope(request: Pick<IncomingMessage, "headers">): string | null {
+    const key = this.sessionKey(request);
+    if (!key || !this.valid(key)) return null;
+    return digest(`web:${key}`);
   }
 
   private cookie(request: Pick<IncomingMessage, "headers">, name: string): string | undefined {
@@ -78,7 +96,7 @@ export class WebAuth {
 
   valid(key: string | undefined, touch = false): boolean {
     const session = key ? this.sessions.get(key) : undefined;
-    if (!session || session.expiresAt <= Date.now() || session.lastSeen + IDLE_AGE <= Date.now()) {
+    if (!session || session.expiresAt <= Date.now() || session.lastSeen + IDLE_AGE <= Date.now() || (this.hub && !this.hub.valid(session.hubKey, touch))) {
       if (key) this.sessions.delete(key);
       return false;
     }
@@ -109,7 +127,7 @@ export class WebAuth {
     for (const key of this.sessions.keys()) this.valid(key);
     while (this.sessions.size >= 8) this.sessions.delete(this.sessions.keys().next().value!);
     const token = crypto.randomBytes(32).toString("base64url");
-    this.sessions.set(digest(token), { expiresAt: Date.now() + MAX_AGE, lastSeen: Date.now() });
+    this.sessions.set(digest(token), { expiresAt: Date.now() + MAX_AGE, lastSeen: Date.now(), hubKey: this.hub?.sessionKey(request.raw) });
     const deviceToken = crypto.randomBytes(32).toString("base64url");
     if (this.credential) {
       this.credential.devices = [...new Set([...(this.credential.devices ?? []), digest(deviceToken)])].slice(-8);
@@ -155,7 +173,7 @@ export class WebAuth {
       if (!this.valid(this.sessionKey(request.raw), true)) return reply.code(401).send({ message: "Vui lòng đăng nhập lại bằng mật khẩu và mã 2FA." });
     });
 
-    app.get("/api/auth/status", async (request) => ({ setupRequired: !this.credential, authenticated: this.valid(this.sessionKey(request.raw)), trustedDevice: this.trustedDevice(request.raw), username: this.valid(this.sessionKey(request.raw)) ? this.credential?.username : undefined }));
+    app.get("/api/auth/status", async (request) => ({ setupRequired: !this.credential, hubEnabled: Boolean(this.hub), authenticated: this.valid(this.sessionKey(request.raw)), trustedDevice: this.trustedDevice(request.raw), username: this.valid(this.sessionKey(request.raw)) ? this.credential?.username : undefined }));
 
     app.post("/api/auth/setup", async (request, reply) => {
       const parsed = setupSchema.safeParse(request.body);
@@ -213,7 +231,17 @@ export class WebAuth {
 
     app.post("/api/auth/logout", async (request, reply) => {
       const key = this.sessionKey(request.raw);
-      if (key) this.sessions.delete(key);
+      if (key) {
+        const scope = digest(`web:${key}`);
+        if (this.onLogoutHook) {
+          try {
+            await this.onLogoutHook(scope);
+          } catch {
+            return reply.code(503).send({ message: "Không thể thu hồi thiết bị thông báo." });
+          }
+        }
+        this.sessions.delete(key);
+      }
       this.setCookies(reply, request, "", undefined, true);
       return { ok: true };
     });
@@ -221,8 +249,8 @@ export class WebAuth {
   }
 }
 
-export function registerAuth(app: FastifyInstance, config: AppConfig): WebAuth {
-  const auth = new WebAuth(config);
+export function registerAuth(app: FastifyInstance, config: AppConfig, hub?: HubAuth): WebAuth {
+  const auth = new WebAuth(config, hub);
   auth.register(app);
   return auth;
 }

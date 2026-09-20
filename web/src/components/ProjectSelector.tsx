@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { browseProject } from "../lib/api";
 import type { BrowseDirectory, ProjectConfig } from "../lib/types";
 
@@ -22,36 +22,70 @@ function buildBreadcrumbs(subpath: string): { label: string; subpath: string }[]
 export function ProjectSelector({ token, projects, selectedProjectId, selectedSubpath, onSelect }: Props) {
   const [browsingProjectId, setBrowsingProjectId] = useState<string | null>(null);
   const [currentSubpath, setCurrentSubpath] = useState("");
+  const [canonicalSubpath, setCanonicalSubpath] = useState("");
   const [directories, setDirectories] = useState<BrowseDirectory[]>([]);
   const [loading, setLoading] = useState(false);
   const [browseError, setBrowseError] = useState<string>();
+
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const sequenceRef = useRef<number>(0);
 
   const browsingProject = projects.find((p) => p.id === browsingProjectId);
   const selectedProject = projects.find((p) => p.id === selectedProjectId);
 
   const navigateTo = useCallback(
     async (projectId: string, subpath: string) => {
+      // Abort previous in-flight request
+      abortControllerRef.current?.abort();
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
+      sequenceRef.current += 1;
+      const currentSeq = sequenceRef.current;
+
       setLoading(true);
       setBrowseError(undefined);
+
       try {
-        const result = await browseProject(token, projectId, subpath || undefined);
+        const result = await browseProject(token, projectId, subpath || undefined, {
+          signal: controller.signal
+        });
+
+        // Ignore out-of-order response
+        if (sequenceRef.current !== currentSeq) return;
+
         setBrowsingProjectId(projectId);
         setCurrentSubpath(subpath);
+        setCanonicalSubpath(result.canonicalSubpath ?? subpath);
         setDirectories(result.directories);
       } catch (err) {
+        if (sequenceRef.current !== currentSeq) return;
+        if (err instanceof DOMException && err.name === "AbortError") return;
         setBrowseError(err instanceof Error ? err.message : "Không tải được danh sách thư mục.");
       } finally {
-        setLoading(false);
+        if (sequenceRef.current === currentSeq) {
+          setLoading(false);
+        }
       }
     },
     [token]
   );
 
   useEffect(() => {
-    if (browsingProjectId) {
-      navigateTo(browsingProjectId, currentSubpath);
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
+
+  const resetBrowse = () => {
+    abortControllerRef.current?.abort();
+    setBrowsingProjectId(null);
+    setDirectories([]);
+    setCurrentSubpath("");
+    setCanonicalSubpath("");
+    setBrowseError(undefined);
+    setLoading(false);
+  };
 
   const selectedDisplay = selectedProject
     ? selectedSubpath
@@ -67,7 +101,11 @@ export function ProjectSelector({ token, projects, selectedProjectId, selectedSu
         {selectedDisplay ? (
           <div className="flex items-center gap-2 border border-signal-400/30 bg-signal-500/5 px-3 py-2 text-xs text-signal-300">
             <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+              <path
+                fillRule="evenodd"
+                d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                clipRule="evenodd"
+              />
             </svg>
             <span className="truncate">{selectedDisplay}</span>
           </div>
@@ -82,7 +120,9 @@ export function ProjectSelector({ token, projects, selectedProjectId, selectedSu
               return (
                 <div
                   key={project.id}
-                  className={`flex items-center border-b border-white/5 last:border-b-0 ${isSelected ? "border-l-2 border-l-signal-400 bg-signal-500/10" : ""}`}
+                  className={`flex items-center border-b border-white/5 last:border-b-0 ${
+                    isSelected ? "border-l-2 border-l-signal-400 bg-signal-500/10" : ""
+                  }`}
                 >
                   <button
                     type="button"
@@ -105,7 +145,11 @@ export function ProjectSelector({ token, projects, selectedProjectId, selectedSu
                     aria-label={`Duyệt thư mục con của ${project.label}`}
                   >
                     <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
+                      <path
+                        fillRule="evenodd"
+                        d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
+                        clipRule="evenodd"
+                      />
                     </svg>
                   </button>
                 </div>
@@ -127,11 +171,7 @@ export function ProjectSelector({ token, projects, selectedProjectId, selectedSu
       <div className="flex flex-wrap items-center gap-1 text-xs">
         <button
           type="button"
-          onClick={() => {
-            setBrowsingProjectId(null);
-            setDirectories([]);
-            setCurrentSubpath("");
-          }}
+          onClick={resetBrowse}
           className="min-h-11 px-2 text-signal-400 active:text-signal-300"
         >
           Tất cả
@@ -165,21 +205,24 @@ export function ProjectSelector({ token, projects, selectedProjectId, selectedSu
         })}
       </div>
 
-      {/* Select current directory button */}
+      {/* Select current directory button - disabled when loading or error */}
       <button
         type="button"
+        disabled={loading || Boolean(browseError)}
         onClick={() => {
-          onSelect(browsingProjectId, currentSubpath || undefined);
-          setBrowsingProjectId(null);
-          setDirectories([]);
-          setCurrentSubpath("");
+          onSelect(browsingProjectId, canonicalSubpath || currentSubpath || undefined);
+          resetBrowse();
         }}
-        className="flex min-h-10 w-full items-center justify-center gap-2 bg-signal-500 text-sm font-bold text-black active:bg-signal-400"
+        className="flex min-h-10 w-full items-center justify-center gap-2 bg-signal-500 text-sm font-bold text-black active:bg-signal-400 disabled:opacity-50 disabled:cursor-not-allowed"
       >
         <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+          <path
+            fillRule="evenodd"
+            d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+            clipRule="evenodd"
+          />
         </svg>
-        Chọn thư mục này
+        {loading ? "Đang tải…" : "Chọn thư mục này"}
       </button>
 
       {/* Directory listing */}
@@ -218,7 +261,11 @@ export function ProjectSelector({ token, projects, selectedProjectId, selectedSu
               </svg>
               <span className="flex-1 truncate text-sm text-zinc-200">{dir.name}</span>
               <svg className="h-3.5 w-3.5 shrink-0 text-zinc-600" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
+                <path
+                  fillRule="evenodd"
+                  d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
+                  clipRule="evenodd"
+                />
               </svg>
             </button>
           ))

@@ -1,8 +1,8 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { beginSetup, confirmSetup, login, type Enrollment } from "../lib/api";
 
-type Props = { setupRequired: boolean; trustedDevice?: boolean; onLogin: () => Promise<void>; error?: string };
-export function LoginScreen({ setupRequired, trustedDevice, onLogin, error }: Props) {
+type Props = { setupRequired: boolean; trustedDevice?: boolean; hubEnabled?: boolean; onLogin: () => Promise<void>; error?: string };
+export function LoginScreen({ setupRequired, trustedDevice, hubEnabled, onLogin, error }: Props) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -12,6 +12,15 @@ export function LoginScreen({ setupRequired, trustedDevice, onLogin, error }: Pr
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(error ?? "");
   const [recoveryMode, setRecoveryMode] = useState(false);
+  useEffect(() => {
+    if (!setupRequired || !hubEnabled) return;
+    const controller = new AbortController();
+    void fetch("/hub-api/web-cli-setup", { credentials: "same-origin", signal: controller.signal })
+      .then(async (response) => { if (!response.ok) throw new Error("Không lấy được mã thiết lập. Hãy đăng nhập lại Server Hub."); return response.json() as Promise<{ setupCode: string }>; })
+      .then((data) => setSetupCode(data.setupCode))
+      .catch((err) => { if (!controller.signal.aborted) setMessage(err.message); });
+    return () => controller.abort();
+  }, [setupRequired, hubEnabled]);
   async function submit(event: FormEvent) {
     event.preventDefault(); setBusy(true); setMessage("");
     try {
@@ -50,7 +59,7 @@ export function LoginScreen({ setupRequired, trustedDevice, onLogin, error }: Pr
           <code className="block select-all break-all text-sm">{enrollment.secret}</code>
           <button type="button" className="control w-full" onClick={() => void copySecret()}>Sao chép khóa</button>
         </div> : <>
-          {setupRequired && <label className="field-label">Mã thiết lập một lần
+          {setupRequired && !hubEnabled && <label className="field-label">Mã thiết lập một lần
             <input autoComplete="off" type="password" value={setupCode} onChange={(e) => setSetupCode(e.target.value)} required />
             <span className="text-xs font-normal text-zinc-400">Mã do chủ máy lấy từ tệp thiết lập riêng trên máy chủ.</span>
           </label>}
@@ -62,6 +71,7 @@ export function LoginScreen({ setupRequired, trustedDevice, onLogin, error }: Pr
         <button className="primary mt-4 w-full" disabled={busy}>{busy ? "Đang kiểm tra…" : enrollment ? "Xác nhận và bật 2FA" : setupRequired ? "Thiết lập 2FA" : "Đăng nhập"}</button>
       </>}
       {message && <p role="status" className="mt-3 text-sm text-amber-200">{message}</p>}
+      {hubEnabled && <a className="control mt-4 flex items-center justify-center" href="/">← Về Server Hub</a>}
     </form>
   </main>;
 }

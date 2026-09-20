@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101c2d">
+  <title>Server Hub · Không gian dịch vụ</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/hub-assets/app.css">
+  <script src="/hub-assets/app.js" defer></script>
+</head>
+<body>
+  <div class="ambient" aria-hidden="true"></div>
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Trang chủ Server Hub"><span class="brand-icon">H<span></span></span>Server <b>Hub</b></a>
+      <span class="private-tag"><span class="dot"></span> Không gian riêng</span>
+    </header>
+
+    <p id="loading" class="loading" role="status">Đang kết nối với máy chủ…</p>
+    <p id="page-error" class="error" role="alert" hidden></p>
+    <button id="retry" class="button secondary" hidden>Thử lại</button>
+
+    <section id="login-view" class="login-layout" hidden>
+      <div class="login-intro">
+        <p class="eyebrow">MỘT NƠI. MỌI CÔNG CỤ.</p>
+        <h1>Máy chủ của bạn.<br><span>Trong tầm tay.</span></h1>
+        <p class="lede">Tạo mã thanh toán, mở terminal và làm việc với các trợ lý AI. Truy cập ngay trên máy tính hoặc điện thoại.</p>
+        <div class="tool-chips"><span>▦ &nbsp; VietQR Studio</span><span>›_ &nbsp; Web CLI</span></div>
+        <div class="orbital" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="core">H<span>●</span></div><span class="orbit-label">YOUR PERSONAL SERVER</span></div>
+      </div>
+      <form id="login-form" class="panel login-panel">
+        <p class="eyebrow">CHÀO MỪNG TRỞ LẠI</p>
+        <h2>Đăng nhập</h2>
+        <p class="muted">Đăng nhập để mở không gian dịch vụ của bạn.</p>
+        <label for="username">Tên đăng nhập</label>
+        <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="40" placeholder="Nhập tên đăng nhập" required>
+        <label for="password">Mật khẩu</label>
+        <div class="password-wrap"><input id="password" name="password" type="password" autocomplete="current-password" maxlength="256" placeholder="Nhập mật khẩu" required><button type="button" id="show-password" aria-label="Hiện mật khẩu" aria-pressed="false">Hiện</button></div>
+        <p id="login-error" class="error" role="alert" hidden></p>
+        <button type="submit" class="button primary">Đăng nhập <span>→</span></button>
+        <p class="form-note">Web CLI có thêm xác thực hai bước để bảo vệ quyền truy cập terminal.</p>
+      </form>
+    </section>
+
+    <section id="hub-view" hidden>
+      <div class="welcome-row"><div><p class="eyebrow" id="greeting">KHÔNG GIAN DỊCH VỤ</p><h1>Mọi thứ, <span>ở đây.</span></h1><p class="lede">Chọn công cụ và bắt đầu công việc của bạn.</p></div><div class="account-actions"><button id="change-password" class="button secondary">Đổi mật khẩu</button><button id="logout" class="button quiet">Đăng xuất ↗</button></div></div>
+      <div id="initial-notice" class="notice" hidden>Bạn đang dùng mật khẩu khởi tạo. Hãy chọn <strong>Đổi mật khẩu</strong> để đặt mật khẩu riêng.</div>
+      <div class="section-heading"><h2>Dịch vụ của bạn <span class="count">02</span></h2><span class="availability" id="availability" role="status">Đang kiểm tra…</span></div>
+      <div class="services">
+        <a href="/vietqr/" class="service-card qr-card" id="vietqr-card">
+          <div class="card-top"><span class="service-icon qr-icon" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h10v10H3zM19 3h10v10H19zM3 19h10v10H3zM19 19h4v4h6v6H19z"/><path d="M7 7h2v2H7zM23 7h2v2h-2zM7 23h2v2H7z"/></svg></span><span class="tag">THANH TOÁN</span></div>
+          <h3>VietQR Studio</h3><p>Tạo mã QR chuyển khoản ngân hàng. Thêm logo, tùy chỉnh thông tin và tải ảnh ngay trên thiết bị.</p>
+          <div class="card-detail"><span>NAPAS247</span><span>Xuất PNG</span><span>Xử lý tại thiết bị</span></div>
+          <div class="card-bottom"><span>Mở VietQR Studio</span><span class="open-arrow">↗</span></div>
+        </a>
+        <a href="/api/web-cli/" class="service-card cli-card" id="web-cli-card">
+          <div class="card-top"><span class="service-icon terminal-icon" aria-hidden="true">›_</span><span class="tag">CÔNG CỤ PHÁT TRIỂN</span></div>
+          <h3>Web CLI</h3><p>Điều khiển terminal và các CLI agent trên máy chủ. Chuyển dự án, theo dõi phiên làm việc theo thời gian thực.</p>
+          <div class="card-detail"><span>Xác thực 2FA</span><span id="agent-count">CLI agent</span><span>Mobile & desktop</span></div>
+          <div class="card-bottom"><span>Mở Web CLI</span><span class="open-arrow">↗</span></div>
+        </a>
+      </div>
+      <div class="info-strip"><span class="info-symbol" aria-hidden="true">↳</span><div><strong>Một hub, hai lớp bảo vệ</strong><p>Đăng nhập hub để dùng các công cụ. Web CLI yêu cầu xác thực riêng trước khi mở terminal.</p></div></div>
+    </section>
+    <footer><span>SERVER HUB <span class="footer-separator">/</span> Không gian làm việc cá nhân</span><span>Kết nối an toàn · HTTPS</span></footer>
+  </main>
+  <dialog id="password-dialog" class="panel">
+    <form id="password-form"><div class="dialog-heading"><h2>Đổi mật khẩu</h2><button type="button" class="close-button" id="close-dialog" aria-label="Đóng">×</button></div><p class="muted">Các phiên đăng nhập khác sẽ được thu hồi.</p><label for="current-password">Mật khẩu hiện tại</label><input id="current-password" type="password" autocomplete="current-password" maxlength="256" required><label for="new-password">Mật khẩu mới · ít nhất 12 ký tự</label><input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required><label for="confirm-password">Nhập lại mật khẩu mới</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required><p id="password-message" class="error" role="status" hidden></p><button type="submit" class="button primary">Lưu mật khẩu <span>→</span></button></form>
+  </dialog>
+</body>
+</html>

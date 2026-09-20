@@ -1,0 +1,28 @@
+{
+  "id": "/api/web-cli/",
+  "start_url": "/api/web-cli/",
+  "scope": "/api/web-cli/",
+  "name": "Web CLI",
+  "short_name": "Web CLI",
+  "description": "Agent CLI Web Controller",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/api/web-cli/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "/api/web-cli/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/api/web-cli/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

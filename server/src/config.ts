@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import { z } from "zod";
+import { loadPushConfig, type PushConfig } from "./pushConfig.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const appRootDir = path.resolve(moduleDir, "../..");
@@ -44,6 +45,7 @@ export type AppConfig = {
   clientOrigins: string[];
   authToken: string;
   authDataDir?: string;
+  hub?: { origin: string; authDataDir: string; username: string };
   agents: AgentConfig[];
   projects: ProjectConfig[];
   outputBufferLimit: number;
@@ -53,9 +55,11 @@ export type AppConfig = {
   maxSessions: number;
   sessionIdleTtlMs: number;
   sessionRetentionMs: number;
+  maxRetainedSessions: number;
   shutdownTimeoutMs: number;
   maxWebsocketConnections: number;
   maxWebsocketBufferedBytes: number;
+  push: PushConfig;
 };
 
 const defaultAgents: AgentConfig[] = [
@@ -187,13 +191,28 @@ export function loadConfig(): AppConfig {
   if (!isLoopbackHost(host)) {
     throw new Error("HOST must be an explicit loopback address (127.0.0.1 or ::1)");
   }
+  let hub: AppConfig["hub"];
+  if (process.env.SERVER_HUB_ORIGIN) {
+    const origin = new URL(process.env.SERVER_HUB_ORIGIN);
+    if (origin.origin !== process.env.SERVER_HUB_ORIGIN || origin.username || origin.password ||
+        (origin.protocol !== "https:" && !(origin.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(origin.hostname)))) {
+      throw new Error("SERVER_HUB_ORIGIN must be an HTTPS origin (HTTP loopback allowed for tests)");
+    }
+    const username = process.env.SERVER_HUB_USERNAME ?? "mrhoan";
+    if (!/^[a-zA-Z0-9_.-]{3,40}$/.test(username)) throw new Error("Invalid SERVER_HUB_USERNAME");
+    hub = { origin: origin.origin, username, authDataDir: path.resolve(process.env.SERVER_HUB_AUTH_DIR ?? "/var/lib/server-hub/hub-auth") };
+  }
+
+  const authDataDir = path.resolve(process.env.WEB_CLI_AUTH_DIR ?? path.join(appRootDir, "../secrets/web-cli-auth"));
+  const push = loadPushConfig(authDataDir);
 
   return {
     host,
     port: readNumber("PORT", 3001),
     clientOrigins: readStringList("CLIENT_ORIGIN", []),
     authToken,
-    authDataDir: path.resolve(process.env.WEB_CLI_AUTH_DIR ?? path.join(appRootDir, "../secrets/web-cli-auth")),
+    hub,
+    authDataDir,
     agents: [{ id: "shell", label: "Terminal", command: "/bin/bash", args: ["-l"], quickActions: { yesAll: "", skip: "", editFirst: "" } }, ...loadAgents().filter((agent) => agent.id !== "shell")],
     projects: loadProjects(),
     outputBufferLimit: readNumber("OUTPUT_BUFFER_LIMIT", 200_000),
@@ -203,8 +222,10 @@ export function loadConfig(): AppConfig {
     maxSessions: readNumber("MAX_SESSIONS", 3),
     sessionIdleTtlMs: readNumber("SESSION_IDLE_TTL_MS", 4 * 60 * 60 * 1000),
     sessionRetentionMs: readNumber("SESSION_RETENTION_MS", 60 * 60 * 1000),
+    maxRetainedSessions: readNumber("MAX_RETAINED_SESSIONS", 50),
     shutdownTimeoutMs: readNumber("SHUTDOWN_TIMEOUT_MS", 15_000),
     maxWebsocketConnections: readNumber("MAX_WS_CONNECTIONS", 8),
-    maxWebsocketBufferedBytes: readNumber("MAX_WS_BUFFERED_BYTES", 1_000_000)
+    maxWebsocketBufferedBytes: readNumber("MAX_WS_BUFFERED_BYTES", 1_000_000),
+    push
   };
 }

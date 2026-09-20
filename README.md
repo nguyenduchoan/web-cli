@@ -1,8 +1,20 @@
 # Agent CLI Web Controller
 
+Repo hiện có thêm **Server Hub**: trang chính đăng nhập username/password,
+VietQR ở `/vietqr/` và Web CLI ở `/api/web-cli/` với 2FA riêng. Bật bằng
+`SERVER_HUB_ORIGIN`; khi không đặt biến này, chế độ Web CLI độc lập vẫn hoạt động.
+Triển khai trên máy hiện tại: [hướng dẫn Server Hub](docs/server-hub-operations.md).
+
 Mobile-first web controller để điều khiển các CLI agent đã cài sẵn trên Debian.
 Máy chủ production hiện cấu hình Codex CLI, OpenCode CLI và Terminal; chỉ thêm
 Claude/Gemini sau khi executable của chúng thực sự được cài.
+
+### Các tính năng nâng cấp chính (v2.0)
+- **Multi-Session độc lập**: Chạy đồng thời nhiều phiên CLI agent khác nhau (hoặc cùng agent tại các thư mục làm việc khác nhau). Quản lý phiên chuyên nghiệp với Sidebar 280px trên Desktop và Bottom Sheet trượt trên Mobile.
+- **Cô lập Draft per-session**: Văn bản nháp đang soạn thảo được lưu riêng biệt trong RAM cho từng phiên, không bị mất và không bị lẫn giữa các phiên.
+- **Kiểm soát Single-Controller an toàn**: Một tab là Controller được quyền gõ lệnh; các tab/thiết bị khác tự động là Viewer (chế độ chỉ xem) và được tự động nâng cấp thành Controller khi tab cũ ngắt kết nối.
+- **Phím tắt `Shift + ←` cho Codex CLI**: Nút chuyên dụng gửi mã `\x1b[1;2D` để trả lời nhanh các câu hỏi xác nhận hoặc plan mode của Codex mà không xóa draft đang soạn thảo.
+- **Thông báo đẩy Web Push (FCM)**: Tự động gửi thông báo đến điện thoại/máy tính khi Codex cần người dùng phản hồi, hỗ trợ deep link `#session=<uuid>` mở đúng phiên. Chi tiết: xem [Hướng dẫn Web Push](docs/firebase-push.md).
 
 Ứng dụng không viết lại các agent này. Backend spawn CLI agent bằng PTY trong project directory thuộc allowlist, stream terminal qua WebSocket, frontend hiển thị bằng xterm.js và cung cấp nút thao tác lớn cho mobile.
 
