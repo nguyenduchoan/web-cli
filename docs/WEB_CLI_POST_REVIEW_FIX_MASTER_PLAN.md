@@ -1062,4 +1062,159 @@ error,error,success
 => retryCount reset 0
 ```
 
---
+---
+
+# 8. PHASE 6 — CANONICAL WORKING DIRECTORY VÀ SAME-FOLDER WARNING
+
+## 8.1 Mục tiêu
+
+Cùng một physical directory phải có cùng identity dù user đi qua:
+
+- symlink,
+- path spelling khác,
+- project/subpath khác nhưng resolve cùng real path.
+
+Backend đã có `workingDirectoryId = sha256(realpath)` cho session. New Session warning phải dùng cùng identity.
+
+## 8.2 Fix browse API canonicalization
+
+File:
+
+```text
+server/src/sessionRoutes.ts
+```
+
+Current browse đang trả `canonicalSubpath` từ sanitized input. Phải trả subpath được tính từ resolved real path:
+
+```ts
+const relative = nodePath.relative(realProjectRoot, realTarget);
+const canonicalSubpath =
+  relative === ""
+    ? ""
+    : relative.split(nodePath.sep).join("/");
+```
+
+Lưu ý:
+
+- `project.path` trong config thường đã realpath, nhưng vẫn dùng một biến `realRoot` rõ ràng.
+- `isSubpathOf(realTarget, realRoot)` phải dùng cùng root canonical.
+- `workingDirectoryId` hash `realTarget`.
+
+## 8.3 Frontend cần nhớ selected workingDirectoryId
+
+`ProjectSelector.onSelect` hiện chỉ trả:
+
+```ts
+(projectId, subpath?)
+```
+
+Mở rộng một cách rõ ràng, ví dụ:
+
+```ts
+onSelect({
+  projectId,
+  subpath,
+  workingDirectoryId
+})
+```
+
+Hoặc thêm argument thứ ba.
+
+Không infer bằng string ở NewSessionDialog nếu browse response đã có ID.
+
+Khi chọn project root trực tiếp:
+
+- dùng `ProjectConfig.workingDirectoryId`.
+
+Khi chọn subfolder:
+
+- dùng `BrowseResult.workingDirectoryId`.
+
+## 8.4 Same-folder conflict
+
+NewSessionDialog:
+
+```text
+selected agent == shell
+=> không warning
+
+selected agent != shell
+=> conflict nếu existing session:
+     agent != shell
+     state in running/idle/stopping
+     workingDirectoryId == selectedWorkingDirectoryId
+```
+
+Không cần `projectId === selectedProjectId`.
+
+## 8.5 Test symlink bắt buộc
+
+Tạo:
+
+```text
+project/real-dir
+project/link-dir -> real-dir
+```
+
+Session existing ở `real-dir`.
+
+Browse/chọn `link-dir`.
+
+Expect:
+
+```text
+same workingDirectoryId
+warning xuất hiện
+```
+
+## 8.6 Không block create
+
+Warning chỉ warning.
+
+Không thêm confirm lần hai.
+
+---
+
+# 9. PHASE 7 — NEW SESSION DIALOG STATE VÀ MOBILE MODAL FLOW
+
+## 9.1 Bug state reuse
+
+Generic “+ Phiên mới” phải mở fresh state.
+
+Hiện `selectedProjectId`/`selectedSubpath` có thể giữ lần trước.
+
+## 9.2 Form opening rules
+
+### Mở generic “+ Phiên mới”
+
+Reset:
+
+```text
+agent = last manually selected agent hoặc default agent theo master plan
+project = first project
+subpath = undefined/root
+workingDirectoryId = project root ID
+name = ""
+error = ""
+browse state reset
+```
+
+Master plan nói agent mặc định theo lựa chọn form lần trước. Vì vậy có thể giữ `lastAgentId`, nhưng **không giữ old project/subpath từ “+ Ở đây”**.
+
+### Mở “+ Ở đây”
+
+Set chính xác:
+
+```text
+agentId = session.agentId
+projectId = session.projectId
+subpath = session.subpath
+workingDirectoryId = session.workingDirectoryId
+name = ""
+```
+
+## 9.3 Không mở hai dialog native cùng lúc trên mobile
+
+Hiện mobile sheet có thể đang `showModal()`, sau đó NewSessionDialog cũng `showModal()`.
+
+Phải đổi 
