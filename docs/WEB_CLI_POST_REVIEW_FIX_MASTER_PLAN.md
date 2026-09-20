@@ -1993,4 +1993,186 @@ Task chỉ DONE khi:
 1. Tất cả P1/P2 ở đầu tài liệu đã được sửa.
 2. Test mới cover chính bug đã review, không chỉ happy path.
 3. `npm run check` PASS.
-4. `npm r
+4. `npm run build` PASS.
+5. `npm test` PASS.
+6. Multi-session smoke PASS.
+7. Mobile smoke PASS.
+8. New terminal sync/backpressure/reconnect tests PASS.
+9. `git diff --check` PASS.
+10. Validation report có bằng chứng lệnh thực tế.
+11. Không còn hard-coded Puppeteer path ngoài repo.
+12. Nếu CI được thêm, GitHub check phải xanh.
+13. Nếu FCM bật production, toàn bộ FCM gate phải PASS.
+14. Nếu FCM chưa live-tested, giữ `FCM_ENABLED=false`.
+
+---
+
+# 19. CÁC LỖI AGENT TUYỆT ĐỐI KHÔNG ĐƯỢC “SỬA” BẰNG WORKAROUND
+
+## Không được:
+
+### Với terminal sync
+
+```text
+sleep(100)
+```
+
+để “đợi xterm”.
+
+Phải dùng write callback/Promise.
+
+### Với queue
+
+Không tăng:
+
+```text
+MAX_WS_BUFFERED_BYTES
+```
+
+để né overflow.
+
+Phải bound queue.
+
+### Với reconnect
+
+Không retry vô hạn.
+
+Không đổi max attempts từ 5 sang số lớn tùy ý.
+
+### Với sequence gap
+
+Không bỏ assertion:
+
+```text
+if seq != expected => reconnect
+```
+
+Không “best effort append”.
+
+### Với same-folder
+
+Không so path string display label.
+
+Phải dùng canonical workingDirectoryId.
+
+### Với modal
+
+Không chỉ đổi z-index của 2 dialog.
+
+Phải tránh hai modal `showModal()` cùng lúc.
+
+### Với push auth
+
+Không bỏ auth-scope check.
+
+Phải sửa filter logic.
+
+### Với test
+
+Không hard-code path môi trường máy dev.
+
+Không skip race tests.
+
+---
+
+# 20. PSEUDOCODE TỔNG HỢP CHO AGENT
+
+## 20.1 Frontend snapshot state machine
+
+```text
+ATTACH
+  |
+  v
+CONNECTING
+  |
+  | WebSocket open
+  v
+WAIT_SYNC_START
+  |
+  | sync_start
+  v
+SYNCING
+  - input blocked
+  - reset xterm
+  - resize xterm to snapshot grid
+  - snapshot writes serialized
+  |
+  | sync_end received
+  | AND all snapshot write callbacks complete
+  | AND chunk count/index valid
+  v
+CONNECTED
+  - if controller: fit viewport -> resize server
+  - input enabled
+  |
+  | seq gap / 1013 / transport loss
+  v
+RECONNECT_BACKOFF
+  |
+  | max 5 fail
+  v
+DISCONNECTED
+  |
+  | user clicks Nối lại
+  v
+CONNECTING
+
+404 / 4004
+  |
+  v
+MISSING
+  - stop retry
+```
+
+## 20.2 Backend sync queue
+
+```text
+attach v2
+  |
+  +--> register listeners BEFORE snapshot barrier
+  |
+  +--> syncComplete=false
+  |
+  +--> output arrives?
+  |      |
+  |      +--> serialize payload byte length
+  |      +--> if queue bytes > limit -> close 1013
+  |      +--> else enqueue
+  |
+  +--> snapshot barrier resolves
+  |
+  +--> send sync_start
+  +--> send chunks
+  +--> send sync_end
+  |
+  +--> syncComplete=true
+  +--> drain queued seq > baseSeq
+  +--> clear queue + byte counter
+  |
+  v
+live
+```
+
+## 20.3 Canonical folder warning
+
+```text
+Project root selection:
+  selectedWorkingDirectoryId = project.workingDirectoryId
+
+Subfolder selection:
+  browse API realpath(target)
+  browse API returns workingDirectoryId
+  selectedWorkingDirectoryId = response.workingDirectoryId
+
+Conflict:
+  selectedAgent != shell
+  AND existing.agent != shell
+  AND existing.state active/stopping
+  AND existing.workingDirectoryId == selectedWorkingDirectoryId
+```
+
+---
+
+# 21. FINAL NOTE TO CODING AGENT
+
+Không được tối ưu “cho nhanh” bằng cách bỏ qua các race conditions trong t
