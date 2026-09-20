@@ -1375,4 +1375,211 @@ this.cache.devices = this.cache.devices.filter((dev) => {
 });
 ```
 
-Nếu endpoint yêu cầu authScope luôn có thì có 
+Nếu endpoint yêu cầu authScope luôn có thì có thể enforce mạnh hơn ở route.
+
+## 10.5 Authorization test bắt buộc
+
+```text
+device D belongs to authScope A
+delete(D, authScope B)
+=> record D remains
+```
+
+Và:
+
+```text
+delete(D, authScope A)
+=> record deleted
+```
+
+## 10.6 Login lifecycle test
+
+Test:
+
+```text
+register
+server store has device
+logout
+server store no device
+login
+```
+
+Nếu Option A:
+
+```text
+consent false
+UI unregistered
+```
+
+Nếu Option B:
+
+```text
+registration refresh call executes
+server store contains device again
+UI registered only after server 200
+```
+
+## 10.7 FCM disabled must remain harmless
+
+With:
+
+```text
+FCM_ENABLED=false
+```
+
+- terminal works,
+- multi-session works,
+- no Firebase startup failure,
+- no red blocking error,
+- no extra permission prompt.
+
+---
+
+# 11. PHASE 9 — SMOKE TEST REPRODUCIBILITY
+
+## 11.1 Bug
+
+Smoke scripts currently fallback tới machine-specific path kiểu:
+
+```text
+/home/mrhoan/source/clone-truyen/node_modules/puppeteer
+```
+
+Clean checkout khác có thể fail.
+
+## 11.2 Required fix
+
+Chọn một trong hai:
+
+### Option A — add Puppeteer as project dev dependency
+
+Ưu tiên nếu CI cần browser test.
+
+Root/package phù hợp:
+
+```json
+"devDependencies": {
+  "puppeteer": "<pinned compatible version>"
+}
+```
+
+Script:
+
+```js
+const puppeteer = require("puppeteer");
+```
+
+### Option B — puppeteer-core + CHROME_PATH
+
+Nếu muốn không download Chromium:
+
+```json
+"puppeteer-core": "..."
+```
+
+Script require package trong repo và bắt buộc `CHROME_PATH`.
+
+Không hard-code đường dẫn home của một máy cụ thể.
+
+## 11.3 Scripts cần sửa
+
+Ít nhất:
+
+```text
+scripts/smoke-multi-session.cjs
+scripts/smoke-mobile.cjs
+scripts/smoke-notifications.cjs
+scripts/smoke-touch-scroll.cjs
+scripts/smoke-hub.cjs
+```
+
+Rà tất cả `require("/home/...")`.
+
+## 11.4 Clean checkout gate
+
+Trên clean environment:
+
+```bash
+npm ci
+npm run check
+npm run build
+npm test
+```
+
+sau đó smoke scripts phải resolve dependencies chỉ từ repo/env documented.
+
+---
+
+# 12. PHASE 10 — ADD CI / AUTOMATED RELEASE EVIDENCE
+
+Current reviewed commit không có GitHub workflow/check status.
+
+Thêm CI nếu repository chưa có.
+
+## 12.1 Minimum CI
+
+File:
+
+```text
+.github/workflows/ci.yml
+```
+
+Trigger:
+
+```text
+push
+pull_request
+```
+
+Jobs tối thiểu:
+
+```text
+npm ci
+npm run check
+npm run build
+npm test
+git diff --check
+```
+
+Nếu browser dependencies có thể setup đáng tin cậy thì thêm smoke subset.
+
+## 12.2 Không chạy live FCM trong CI
+
+FCM live cần credential owner, không đưa vào repo.
+
+CI chỉ:
+
+- unit fake sender,
+- route disabled/enabled mock,
+- worker build,
+- notification smoke không cần gửi FCM thật.
+
+Live FCM vẫn có gate manual riêng.
+
+---
+
+# 13. TEST MATRIX BẮT BUỘC SAU KHI HOÀN TẤT TẤT CẢ PHASE
+
+Agent phải tạo hoặc cập nhật validation report với matrix sau.
+
+## 13.1 Backend multi-session
+
+### S01
+
+2 Codex cùng cwd chạy độc lập.
+
+### S02
+
+Codex + Shell cùng cwd, kill/restart một session không ảnh hưởng session kia.
+
+### S03
+
+Different cwd isolation.
+
+### S04
+
+Different subpath -> different workingDirectoryId.
+
+### S05
+
+Traversal/non-directory/pa
