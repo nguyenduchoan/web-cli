@@ -1582,4 +1582,231 @@ Different subpath -> different workingDirectoryId.
 
 ### S05
 
-Traversal/non-directory/pa
+Traversal/non-directory/path missing không consume slot.
+
+### S06
+
+Capacity active + reserved đúng.
+
+### S07
+
+Restart active giữ slot cũ, không chiếm thêm slot.
+
+### S08
+
+Restart exited cần slot mới.
+
+### S09
+
+Restart timeout giữ session stopping, không giả exited.
+
+### S10
+
+Retention removes old exited session và emits removed.
+
+## 13.2 WebSocket v2
+
+### W01
+
+v1/v2 không double replay.
+
+### W02
+
+Snapshot baseSeq đúng.
+
+### W03
+
+Live output sequence liên tục sau sync.
+
+### W04
+
+Unicode chunks <= 16 KiB UTF-8.
+
+### W05
+
+Snapshot too large -> controlled error.
+
+### W06
+
+First socket controller, second viewer.
+
+### W07
+
+Controller disconnect -> oldest viewer promoted.
+
+### W08
+
+Viewer input/resize blocked.
+
+### W09
+
+Sequence gap -> reconnect.
+
+### W10
+
+Auth/origin/ticket validation.
+
+### W11 — NEW
+
+Sync liveQueue bounded; overflow closes 1013.
+
+### W12 — NEW
+
+Unicode payload byte accounting.
+
+### W13 — NEW
+
+Slow syncing client does not pause/kill PTY or other client.
+
+## 13.3 Frontend terminal
+
+### U01
+
+Create B while A running.
+
+### U02
+
+Rapid switching without crosstalk.
+
+### U03
+
+Draft isolation.
+
+### U04
+
+Create error preserves form.
+
+### U05
+
+Kill/restart merge by revision.
+
+### U06
+
+Selection generation prevents async auto-switch race.
+
+### U07
+
+Missing session state.
+
+### U08/U09
+
+Codex Shift+Left behavior.
+
+### U10/U11
+
+Viewer + promotion.
+
+### U12
+
+Reload restore.
+
+### U13 — NEW
+
+Snapshot writes complete before input enabled.
+
+### U14 — NEW
+
+Controller restores snapshot at snapshot grid before viewport fit.
+
+### U15 — NEW
+
+Late terminal write from A cannot affect B after switch.
+
+### U16 — NEW
+
+Chunk gap/chunk count mismatch reconnects.
+
+### U17 — NEW
+
+Reconnect stops after 5 consecutive failures.
+
+### U18 — NEW
+
+4004/404 -> missing and no reconnect loop.
+
+## 13.4 New Session UX
+
+### N01
+
+Generic open resets project/subpath correctly.
+
+### N02
+
+“+ Ở đây” prefills exact cwd.
+
+### N03
+
+Canonical same-directory warning via symlink.
+
+### N04
+
+Shell-only same-folder does not warn.
+
+### N05
+
+Warning does not block create.
+
+### N06
+
+Mobile never has >1 open modal dialog.
+
+## 13.5 Poll/state
+
+### P01
+
+LOAD snapshot prunes removed draft/attention.
+
+### P02
+
+Logout resets session state.
+
+### P03
+
+Polling error delays follow 1/2/4/8/15 pattern.
+
+### P04
+
+Success resets retry count.
+
+## 13.6 FCM
+
+### F01
+
+Disabled mode harmless.
+
+### F02
+
+Device store permissions/write tests.
+
+### F03
+
+Auth-scope mismatch cannot delete another record.
+
+### F04
+
+Logout/re-login state cannot falsely show registered.
+
+### F05
+
+No duplicate foreground listeners after repeated enable/mount.
+
+---
+
+# 14. MANUAL MOBILE REGRESSION CHECK
+
+Browser automated test không thay thế hoàn toàn iOS/mobile manual regression.
+
+Sau automated PASS, thực hiện manual checklist.
+
+## 14.1 iPhone portrait
+
+- Open Web CLI.
+- Create session A.
+- Create session B.
+- Switch A/B.
+- Draft A giữ riêng.
+- Terminal touch scroll được.
+- Composer không bị sheet che.
+- Mở Session sheet.
+- Mở New Session.
+- Xác nhận chỉ có một modal.
