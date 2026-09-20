@@ -194,4 +194,280 @@ Nhưng frontend `web/src/lib/api.ts` đọc:
 code = body.code;
 ```
 
-Do đó các lỗi ses
+Do đó các lỗi session có thể tạo:
+
+```ts
+ApiError.code === undefined
+```
+
+dù backend đã trả error code đúng.
+
+## 3.2 File sửa
+
+```text
+web/src/lib/api.ts
+```
+
+Có thể thêm test frontend helper nếu project có hạ tầng test phù hợp. Nếu không có frontend unit runner thì bắt buộc test API helper qua một test tách được hoặc smoke bằng browser.
+
+## 3.3 Logic bắt buộc
+
+Type body phải hỗ trợ cả hai field vì notification endpoints hiện dùng `code`, session endpoints dùng `error`.
+
+Sửa từ logic tương đương:
+
+```ts
+code = body.code;
+```
+
+thành:
+
+```ts
+code = body.code ?? body.error;
+```
+
+Type:
+
+```ts
+type ApiErrorBody = {
+  error?: string;
+  code?: string;
+  message?: string;
+  loginUrl?: string;
+};
+```
+
+Không được bỏ support `code`, vì push routes hiện có response dùng `code`.
+
+## 3.4 Acceptance tests bắt buộc
+
+Test ít nhất các case:
+
+```text
+HTTP 429 body {error:"session_capacity_reached",message:"..."}
+=> thrown ApiError.code === "session_capacity_reached"
+
+HTTP 409 body {error:"session_operation_in_progress",message:"..."}
+=> ApiError.code === "session_operation_in_progress"
+
+HTTP 409 body {code:"notifications_disabled",message:"..."}
+=> ApiError.code === "notifications_disabled"
+```
+
+## 3.5 Gate Phase 1
+
+PASS khi:
+
+- Typecheck frontend xanh.
+- Error contract test xanh.
+- Không đổi backend response shape chỉ để né bug frontend.
+
+---
+
+# 4. PHASE 2 — FIX TERMINAL V2 SNAPSHOT RESTORE CORRECTNESS
+
+Đây là phase quan trọng nhất.
+
+## 4.1 Vấn đề A — sync_end đến trước khi xterm write hoàn tất
+
+Current flow gần tương đương:
+
+```text
+snapshot_chunk -> terminal.write(...)
+snapshot_chunk -> terminal.write(...)
+sync_end       -> syncComplete = true
+```
+
+`Terminal.write()` có parse queue nội bộ. Gọi `write()` không đồng nghĩa terminal state đã apply xong ngay lập tức.
+
+Nếu bật input ngay ở `sync_end`, người dùng có thể input trong lúc:
+
+- snapshot chưa apply hết,
+- bracketedPasteMode chưa restore,
+- cursor/mode chưa restore,
+- alternate buffer chưa restore.
+
+## 4.2 Vấn đề B — controller không resize về snapshot grid trước restore
+
+Current code chỉ:
+
+```ts
+if (message.control === "viewer") {
+  terminal.resize(message.cols, message.rows);
+}
+```
+
+Controller cũng phải deserialize snapshot ở đúng grid kích thước server snapshot.
+
+## 4.3 Vấn đề C — chưa verify chunk index/chunkCount đầy đủ
+
+Frontend phải không chấp nhận snapshot nếu:
+
+- index bị bỏ,
+- index lặp sai,
+- chunkCount không khớp,
+- syncId không khớp,
+- sessionId không khớp,
+- serverEpoch không khớp,
+- connection generation đã stale.
+
+## 4.4 File sửa
+
+```text
+web/src/components/TerminalPane.tsx
+web/src/lib/types.ts   // chỉ nếu cần type bổ sung
+```
+
+Có thể tạo helper riêng:
+
+```text
+web/src/lib/terminalSync.ts
+```
+
+nếu làm vậy giúp code rõ hơn. Không bắt buộc.
+
+## 4.5 State/ref cần có
+
+Agent phải quản lý tối thiểu:
+
+```ts
+const syncIdRef = useRef("");
+const syncCompleteRef = useRef(false);
+const expectedSnapshotChunkRef = useRef(0);
+const expectedSnapshotChunkCountRef = useRef<number | null>(null);
+const pendingSnapshotWritesRef = useRef(Promise.resolve());
+const expectedSeqRef = useRef(0);
+```
+
+Nếu dùng queue khác thì phải giữ cùng semantics.
+
+## 4.6 Quy trình đúng bắt buộc
+
+### Khi nhận `sync_start`
+
+Phải thực hiện theo thứ tự:
+
+```text
+1. Verify sessionId của message = current session.
+2. Verify serverEpoch hợp lệ với attach hiện tại.
+3. Verify current socket identity.
+4. Verify current connection generation.
+5. syncComplete=false.
+6. block input.
+7. syncing=true.
+8. save syncId.
+9. expected chunk index = 0.
+10. reset terminal.
+11. resize terminal = snapshot cols/rows CHO CẢ controller và viewer.
+12. chưa fit theo viewport ở bước này.
+13. chưa gửi resize lên server ở bước này.
+14. set role từ message.control.
+```
+
+### Khi nhận `snapshot_chunk`
+
+Phải:
+
+```text
+1. Verify syncId.
+2. Verify sessionId.
+3. Verify epoch/generation/socket.
+4. Verify index == expectedSnapshotChunkIndex.
+5. Nếu sai -> abort current socket + reconnect snapshot mới.
+6. Queue terminal.write theo thứ tự.
+7. Chỉ tăng expected index sau khi chunk được chấp nhận.
+```
+
+Nên wrap `terminal.write(data, callback)` thành Promise:
+
+```ts
+function writeTerminal(term: Terminal, data: string): Promise<void> {
+  return new Promise((resolve) => {
+    term.write(data, resolve);
+  });
+}
+```
+
+Sau đó serialize:
+
+```ts
+snapshotWriteChain = snapshotWriteChain.then(
+  () => writeTerminal(terminal, message.data)
+);
+```
+
+Không fire-and-forget.
+
+### Khi nhận `sync_end`
+
+Không set connected ngay.
+
+Phải:
+
+```text
+1. Verify syncId.
+2. Verify received chunk count == message.chunkCount.
+3. Await toàn bộ snapshot write chain.
+4. Sau await, verify socket/session/generation vẫn còn hợp lệ.
+5. Set expected terminal seq = baseSeq + 1.
+6. syncComplete=true.
+7. syncing=false.
+8. connected=true.
+9. Nếu role controller:
+     - fit/propose viewport,
+     - resize local terminal nếu cần,
+     - gửi resize lên server sau sync.
+10. Chỉ lúc này mới unblock input.
+```
+
+## 4.7 Switch A -> B race bắt buộc xử lý
+
+Case:
+
+```text
+Session A đang restore snapshot chunk cuối
+↓
+User switch sang Session B
+↓
+callback terminal.write của A chạy muộn
+```
+
+Callback A **không được**:
+
+- bật connected cho B,
+- ghi state connection của B,
+- gọi resize của B,
+- unblock input B sai lúc.
+
+Nếu xterm instance dùng chung và `terminal.write` của A vẫn có thể apply sau reset B thì phải có barrier/drain trước khi render B.
+
+Cách an toàn được chấp nhận:
+
+### Option A — queue global theo xterm instance
+
+Mọi write của snapshot/live output đi qua một serialized write chain.
+
+Khi switch:
+
+```text
+invalidate generation
+wait/drain prior chain
+reset
+start B sync
+```
+
+### Option B — recreate xterm instance theo session generation
+
+Chỉ dùng nếu không phá touch scroll, fit, performance và tests hiện có.
+
+Ưu tiên Option A vì ít thay đổi architecture.
+
+## 4.8 Live `output` và `terminal_resize`
+
+Sau sync complete:
+
+- `seq <= appliedSeq`: duplicate -> bỏ.
+- `seq === appliedSeq + 1`: apply.
+- `seq > appliedSeq + 1`: gap -> block input + close/reconnect.
+
+Không được apply out-of-order.
