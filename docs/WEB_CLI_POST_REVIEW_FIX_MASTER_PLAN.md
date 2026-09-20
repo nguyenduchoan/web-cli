@@ -854,4 +854,212 @@ Nhưng vẫn tính vào 5 attempts.
 
 Không restart PTY.
 
-## 6.
+## 6.9 Test bắt buộc
+
+### R1
+
+5 lần network fail:
+
+```text
+1,2,4,8,15 sec (+jitter)
+=> sau attempt 5 stop
+=> UI disconnected
+=> Nối lại available
+```
+
+Có thể fake timers/unit test helper thay vì chờ 30 giây thật.
+
+### R2
+
+Socket close 4004:
+
+```text
+=> missing
+=> không reconnect
+```
+
+### R3
+
+Ticket endpoint 404:
+
+```text
+=> missing
+=> list refresh exactly once hoặc bounded
+=> không reconnect loop
+```
+
+### R4
+
+1013:
+
+```text
+=> retry
+=> eventually successful sync resets attempt=0
+```
+
+### R5
+
+TCP `open` nhưng sync luôn fail:
+
+```text
+=> không reset retry counter ở open
+=> sau 5 failed sync attempts dừng
+```
+
+---
+
+# 7. PHASE 5 — SESSION REDUCER CLEANUP VÀ POLLING BACKOFF
+
+## 7.1 Draft/attention prune
+
+Khi `LOAD_SESSIONS` là authoritative snapshot cùng epoch, session IDs không còn trong list phải bị prune khỏi:
+
+```text
+draftsBySessionId
+attentionBySessionId
+seenAttentionBySessionId
+```
+
+Ngoại lệ:
+
+- Nếu active ID vừa missing và cần message UI thì giữ connection state `missing`, nhưng không giữ prompt draft vô thời hạn.
+
+Tạo helper:
+
+```ts
+function pruneKeyedState<T>(
+  source: Record<string, T>,
+  validIds: Set<string>
+): Record<string, T>
+```
+
+## 7.2 Logout reset state
+
+Khi logout/auth expired:
+
+- clear active session,
+- block input,
+- clear drafts,
+- clear attention,
+- clear seen attention,
+- clear pending operations,
+- clear sessions list nếu auth boundary yêu cầu.
+
+Ưu tiên action mới:
+
+```text
+RESET_SESSIONS
+```
+
+thay vì dispatch nhiều action rời rạc.
+
+Nếu thêm action:
+
+```ts
+{ type: "RESET_SESSIONS" }
+```
+
+reducer trả clean initial state nhưng giữ configured `capacity.max` chỉ nếu cần. Thông thường reset full initial state là dễ hiểu hơn.
+
+## 7.3 Polling backoff bug
+
+Current flow có thể:
+
+```text
+fetchSessions error
+=> set retry timer
+=> caller finally scheduleNextPoll()
+=> clear retry timer
+=> fixed 5s
+```
+
+Phải có một nơi duy nhất sở hữu scheduling.
+
+### Cách khuyến nghị
+
+`fetchSessions()`:
+
+- chỉ fetch + update state.
+- không schedule timer bên trong.
+
+Polling effect:
+
+```text
+success -> retryCount=0 -> schedule 5s
+failure -> increment -> schedule backoff
+```
+
+Focus/online:
+
+```text
+reset retry cycle
+fetch immediately
+then schedule based result
+```
+
+Không cho `fetchSessions()` và effect cùng set `pollTimerRef`.
+
+## 7.4 Poll chỉ khi cần
+
+Theo master plan:
+
+- authenticated,
+- visible,
+- online,
+- còn active session.
+
+Nếu hiện implementation poll ngay cả không có active session, sửa để giảm request.
+
+Tuy nhiên khi Session Manager mở hoặc login/create/kill/restart vẫn refresh ngay explicit.
+
+## 7.5 Tests
+
+### P5.1
+
+Authoritative list từ:
+
+```text
+[A,B]
+```
+
+sang:
+
+```text
+[B]
+```
+
+Expect draft/attention/seen của A removed.
+
+### P5.2
+
+Logout:
+
+```text
+sessions state reset
+drafts empty
+attention empty
+connection idle
+input blocked
+```
+
+### P5.3 Backoff
+
+Mock 3 lỗi liên tiếp:
+
+```text
+next delays ≈ 1s,2s,4s
+```
+
+Không bị thay bằng 5s.
+
+### P5.4 Success reset
+
+Sau failure:
+
+```text
+error,error,success
+=> next poll normal 5s
+=> retryCount reset 0
+```
+
+--
