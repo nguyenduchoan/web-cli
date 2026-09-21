@@ -6,7 +6,7 @@
 >
 > **Đối tượng thực hiện:** coding agent có khả năng suy luận hạn chế. Không tự đổi kiến trúc, không tự rút gọn acceptance criteria, không bỏ test, không thay bug thật bằng workaround timing.
 >
-> **Nguyên tắc:** mỗi finding trong tài liệu này phải có một test có khả năng FAIL trên baseline `3d2f7e6` và PASS sau khi sửa.
+> **Nguyên tắc:** mỗi bug được xác nhận trên baseline phải có ít nhất một test tái hiện FAIL trên `3d2f7e6` và PASS sau khi sửa. Test bảo vệ hành vi đã đúng hoặc ngăn regression do thay đổi mới vẫn cần thiết và có thể PASS trên baseline; chúng không thay thế test tái hiện bug. Với thay đổi hạ tầng như browser CI, phải có bằng chứng chạy thực tế.
 
 ---
 
@@ -42,21 +42,25 @@ Tuy nhiên còn các lỗi correctness/lifecycle sau.
 
 1. **Shared xterm race khi switch/reconnect:** write cũ của Session A có thể hoàn tất sau `reset()` của Session B.
 2. **Live output và terminal resize chưa được apply theo cùng một ordered operation chain.**
+3. **Live output/resize đến sau `sync_end` nhưng trước khi snapshot drain có thể bị bỏ qua:** `handleSyncEnd()` đang async, còn `handleOutput()`/resize từ message kế tiếp thấy `syncComplete=false` và reject message.
+4. **Callback snapshot của socket đã đóng có thể báo connected và reset retry counter:** cần invalidate theo từng lần kết nối, không chỉ khi đổi session.
 
 ## P2 — PHẢI SỬA TRƯỚC PRODUCTION
 
-3. Reconnect tests đang test `ReconnectManager`, nhưng production `TerminalPane` không dùng class đó.
-4. `onMismatchOrGap()` có thể schedule reconnect hai lần cho cùng một failure.
-5. Mobile modal đang dựa vào `setTimeout(50)` thay vì lifecycle deterministic.
-6. Mobile smoke chưa assert `dialog[open].length === 1`.
-7. FCM reload/login lifecycle vẫn có thể hiển thị `registered` giả và thiếu foreground listener nếu FCM bật.
+5. Reconnect tests đang test `ReconnectManager`, nhưng production `TerminalPane` không dùng class đó.
+6. `onMismatchOrGap()` có thể schedule reconnect hai lần cho cùng một failure.
+7. Mobile modal đang dựa vào `setTimeout(50)` thay vì lifecycle deterministic.
+8. Mobile smoke chưa assert `dialog[open].length === 1`.
+9. FCM reload/login lifecycle vẫn có thể hiển thị `registered` giả và thiếu foreground listener nếu FCM bật.
+10. Khi bổ sung FCM refresh tại mount, phải xử lý hai instance `NotificationSettings` trong desktop sidebar và mobile dialog để tránh tranh chấp listener/generation.
 
 ## P3 — HARDENING
 
-8. Polling vẫn chạy mỗi 5 giây dù không có active session.
-9. Chưa có test thực sự cho polling backoff/reset.
-10. Restart session đã exited/error vẫn overwrite historical `exitReason`.
-11. Browser smoke chưa chạy trong CI.
+11. Polling vẫn chạy mỗi 5 giây dù không có active session.
+12. Chưa có test thực sự cho polling backoff/reset.
+13. Việc chỉ đọc `stateRef.current.activeSessionId` không tự khởi động lại scheduler khi phiên được chọn/tạo sau khi timer đã dừng.
+14. Restart session đã exited/error vẫn overwrite historical `exitReason`.
+15. Browser smoke chưa chạy trong CI.
 
 ---
 
@@ -80,7 +84,8 @@ Agent phải tuân thủ:
    - chạy `npm run check`,
    - ghi validation.
 8. Không được ghi PASS nếu command chưa chạy thật.
-9. Nếu test mới cũng PASS trên baseline cũ thì test chưa bắt đúng regression.
+9. Phân loại bằng chứng thành test tái hiện bug, test bảo vệ contract/lifecycle và kiểm chứng hạ tầng. Chỉ test tái hiện bug đã có trên baseline bắt buộc FAIL trước/PASS sau. OR3/OR4 là ví dụ hành vi đã đúng trên baseline; không sửa hoặc làm yếu chúng để tạo FAIL giả. Lỗi import helper chưa tồn tại trên baseline không được tính là tái hiện bug.
+10. Mọi callback async có thể sống qua socket close, logout, unmount hoặc session switch phải có generation/abort guard và test callback đến muộn.
 
 ---
 
@@ -208,6 +213,7 @@ Quan trọng:
 
 - operation đã **bắt đầu chạy** không thể hủy.
 - Vì vậy khi switch session, trước `reset()` session mới phải có barrier đảm bảo operation cũ đã drain.
+- Barrier bảo vệ thứ tự mutate xterm; callback cập nhật UI/retry vẫn cần guard theo socket attempt tại mục 5.4. Write đã bắt đầu có thể drain, nhưng completion của attempt đã invalid không được báo sync thành công.
 
 ## 3.5 Switch flow bắt buộc
 
@@ -219,6 +225,7 @@ Khi `session?.id` hoặc `connectionGeneration` đổi:
 3. mark old xterm generation stale
 4. await global xterm write barrier
 5. only then:
+     recheck generation/cleanup để bỏ continuation đã stale
      reset xterm
      attach/sync new session
 ```
@@ -362,6 +369,31 @@ resize21
 write22 callback done
 ```
 
+### Chuyển từ snapshot sang live stream
+
+Server gửi `sync_end` rồi drain live messages ngay; server không chờ callback xterm phía browser. `TerminalPane` gọi `handleSyncEnd()` async nên message tiếp theo có thể đến khi snapshot vẫn đang ghi.
+
+Phải tách hai trạng thái:
+
+- **Đã nhận `sync_end` hợp lệ:** được nhận/validate/enqueue live output và resize của cùng attempt.
+- **Snapshot đã drain:** được đánh dấu terminal sync complete và bật input nếu attempt vẫn còn hợp lệ, socket còn OPEN và role là controller.
+
+Flow bắt buộc:
+
+```text
+sync_start -> reset/resize/snapshot operations trong global queue
+sync_end hợp lệ -> cho phép nhận live ngay, enqueue sync-complete marker sau snapshot
+output/resize tiếp theo -> validate seq ngay, enqueue sau marker
+snapshot callback done -> marker kiểm tra attempt còn hợp lệ rồi báo sync complete
+live operations -> execute đúng thứ tự seq
+```
+
+`expectedSeq` theo dõi các live message đã nhận và chấp nhận. Khởi tạo từ `baseSeq + 1` của sync; completion callback không được gán lại `expectedSeq = baseSeq + 1` sau khi đã nhận live message.
+
+Không bỏ live message chỉ vì `syncComplete` của renderer còn false sau `sync_end` hợp lệ. Live message trước `sync_end` hợp lệ vẫn là lỗi protocol. `sync_end` phải khớp `syncId`, `baseSeq` và chunk count của sync hiện tại.
+
+Live operations chờ snapshot drain phải có giới hạn backlog theo UTF-8 bytes; xác định rõ limit trong implementation/validation. Khi quá giới hạn, invalidate attempt, đóng socket và để close handler retry snapshot theo Phase 3. Không drop riêng message rồi tiếp tục stream với seq thiếu, không tăng buffer để che lỗi.
+
 ## 4.3 Thay đổi TerminalSyncController
 
 Không cho `handleTerminalResize()` gọi resize sync trực tiếp.
@@ -370,11 +402,13 @@ Không cho `handleTerminalResize()` gọi resize sync trực tiếp.
 
 ```ts
 public handleTerminalResize(msg: ResizeMessage): boolean {
+  require valid sync_end received for current healthy attempt
   validate seq
   expectedSeq++
 
+  const applyResize = role === "viewer"
   queue.enqueue(currentGeneration, async () => {
-    if role === "viewer" {
+    if applyResize {
       resizeTerminal(msg.cols, msg.rows)
     }
   })
@@ -432,7 +466,7 @@ write12-end
 
 ### OR3
 
-Duplicate resize:
+Duplicate resize — test bảo vệ contract, hành vi này đã đúng trên baseline:
 
 ```text
 seq < expected
@@ -442,7 +476,7 @@ seq < expected
 
 ### OR4
 
-Gap:
+Gap — test bảo vệ contract, hành vi này đã đúng trên baseline:
 
 ```text
 expected 11
@@ -450,6 +484,29 @@ got resize12
 => reconnect
 => không enqueue resize
 ```
+
+### OR5 — live messages trong lúc snapshot drain
+
+Dùng promise điều khiển được, không dùng sleep:
+
+```text
+sync_start baseSeq=10, role=viewer
+snapshot write đã bắt đầu và còn pending
+nhận sync_end hợp lệ
+nhận output11, resize12 trước khi snapshot callback resolve
+```
+
+Assert trước khi resolve:
+
+- Cả hai live message được chấp nhận, `expectedSeq=13`, không báo gap.
+- Chưa gọi sync-complete callback, input vẫn bị khóa.
+- Chưa apply output11/resize12.
+
+Sau khi resolve, thứ tự là `snapshot-end -> sync-complete -> output11 -> resize12`. `expectedSeq` vẫn là 13; output13 tiếp theo được chấp nhận. Chạy qua message dispatcher production hoặc controller mà production thực sự dùng.
+
+### OR6 — backlog overflow khi snapshot chưa drain
+
+Giữ snapshot write pending, đưa live data vượt limit đã chọn. Ở Phase 2, kiểm tra controller/queue invalid generation, yêu cầu đóng socket đúng một lần, không tiếp tục apply stream thiếu seq và không báo sync complete từ callback snapshot cũ. Kiểm chứng tích hợp close chỉ schedule một retry thuộc Phase 3, dùng cùng đường failure với RP2/RP6.
 
 ---
 
@@ -521,10 +578,12 @@ Phải sửa thành:
 ```text
 mismatch/gap:
   mark socket unhealthy
+  invalidate attempt/controller ngay, block input
   close socket
   KHÔNG schedule ở đây
 
 close handler:
+  invalidate attempt/controller nếu chưa invalid
   là owner duy nhất quyết định retry
 ```
 
@@ -564,13 +623,30 @@ Chỉ:
 after complete v2 sync
 ```
 
+Sync này phải thuộc **attempt hiện hành, chưa invalid và socket còn OPEN**. Snapshot completion của socket đã gap/close không phải sync thành công, dù `sessionId` vẫn giống nhau.
+
 Không reset tại:
 
 ```text
 TCP open
 ticket success
 sync_start
+late snapshot completion from a closed/invalid attempt
 ```
+
+### Attempt generation và callback đến muộn
+
+Hiện tại controller được tạo ngoài `connect()` và close handler không invalidate nó. Vì vậy `handleSyncEnd()` đang chờ write có thể hoàn tất trong thời gian chờ retry và gọi `onSyncComplete()`, khiến UI báo connected/reset attempt sai.
+
+Contract bắt buộc:
+
+1. Mỗi lần kết nối, bao gồm auto-reconnect cùng session, có `attemptGeneration` riêng. Không chỉ dựa vào `sessionId` hoặc prop `connectionGeneration` vốn có thể giữ nguyên qua auto-reconnect.
+2. Ticket request, socket listeners và sync controller thuộc attempt đó. Có thể tạo controller mới cho mỗi attempt; global xterm queue vẫn thuộc xterm instance, còn reconnect manager giữ bộ đếm xuyên các attempt.
+3. Gap/close/session switch/cleanup đánh dấu attempt invalid ngay. Xterm operation chưa chạy của attempt cũ bị skip; operation đã bắt đầu được drain qua barrier.
+4. Completion sau mọi `await` kiểm tra attempt còn hiện hành. Callback sync-complete còn phải kiểm tra socket OPEN và healthy trước khi đổi UI, bật input hoặc gọi `onSyncSuccess()`.
+5. Event/callback từ socket cũ không được đóng socket mới, xóa heartbeat/timer của attempt mới hoặc tiêu thụ thêm retry. Close của attempt vừa invalid do gap vẫn được owner xử lý một lần để quyết định retry; các event lặp lại bị bỏ qua.
+
+Không thay thế invalidation bằng timeout hoặc chỉ kiểm tra session ID.
 
 ## 5.5 Manual reconnect
 
@@ -591,6 +667,8 @@ Không restart PTY.
 Test hoặc static assertion cho thấy `TerminalPane` production dùng reconnect policy helper.
 
 Không đủ chỉ test class riêng.
+
+RP2–RP6 phải chạy event handlers/state machine dùng trong production, với socket và timer điều khiển được. Static import assertion của RP1 không thay thế các test hành vi này.
 
 ### RP2 — mismatch consumes one attempt
 
@@ -632,6 +710,28 @@ close 4004
 => no timer
 => fetch list once
 ```
+
+### RP5 — snapshot completion sau retryable close
+
+```text
+snapshot write đã bắt đầu và còn pending
+nhận sync_end
+socket close 1006 -> schedule một retry
+resolve snapshot write trước khi retry timer chạy
+```
+
+Assert callback cũ không báo connected, không bật input, không reset attempt và không thay đổi retry timer. Sau khi timer chạy, chỉ attempt mới còn hợp lệ được hoàn tất sync và reset counter.
+
+### RP6 — gap rồi reconnect cùng session
+
+```text
+old attempt: snapshot pending, sync_end hợp lệ, live message có seq gap
+invalidate old attempt -> close -> một retry
+new attempt cho cùng session được tạo
+old write callback/old socket event đến muộn
+```
+
+Assert event/callback cũ không cập nhật UI/counter, không đóng socket mới và không clear timer/heartbeat của attempt mới. New reset vẫn chờ old write drain theo XQ3; new sync hoàn tất bình thường. Một gap chỉ tiêu thụ một retry attempt.
 
 ---
 
@@ -785,7 +885,11 @@ Không attach foreground listener.
 
 ## 7.2 Behavior đúng
 
-Khi component/app authenticated mount:
+Một owner ở cấp app authenticated quản lý registration, foreground listener và push state dùng chung. `NotificationSettings` chỉ hiển thị state và gọi action của owner.
+
+Lý do: `SessionManager` render cùng `sessionContent` trong desktop sidebar và mobile dialog. Khi sidebar chưa collapsed, cả hai `NotificationSettings` đều mounted; CSS ẩn không unmount component. Tự refresh ở mỗi instance sẽ tạo hai registration cạnh tranh trên generation/listener toàn cục.
+
+Khi owner của app authenticated mount:
 
 ```text
 if config enabled
@@ -805,6 +909,10 @@ refreshPushRegistration(config, listener)
 ```
 
 để không request permission.
+
+Nếu giữ lời gọi từ nhiều component, phải dùng service dùng chung với một registration promise đang chạy cho mỗi auth generation (single-flight), cùng state/subscription cho các consumer. Hai lời gọi đồng thời không được tăng generation để hủy nhau, unsubscribe listener của nhau hoặc tạo hai request đăng ký backend.
+
+Unmount/collapse một `NotificationSettings` chỉ bỏ subscription của instance đó. Cleanup listener và invalidation registration thuộc owner khi logout/auth-expired hoặc khi lifecycle chung thực sự kết thúc. Login mới tạo auth generation mới; không dùng lại promise hay kết quả của generation trước.
 
 ## 7.3 Vấn đề B — logout chưa invalidate registration đang pending hoàn toàn
 
@@ -837,6 +945,8 @@ không được call registerPushDevice
 không set consent lại
 ```
 
+Capture generation trước bước async đầu tiên và kiểm tra lại sau mỗi `await`, trước khi attach listener/gọi backend và trước khi ghi consent hoặc cập nhật shared state. Nếu request backend đã được gửi trước logout thì không thể thu hồi chỉ bằng guard; completion muộn vẫn không được khôi phục consent/state, và phải giữ cơ chế revoke auth-scope hiện có.
+
 ## 7.4 Tests
 
 ### F2.1 Reload
@@ -844,7 +954,7 @@ không set consent lại
 ```text
 consent true
 permission granted
-component mount
+authenticated owner mount, NotificationSettings subscribe
 => backend registration refresh called
 => onMessage attached
 => state registered only after success
@@ -866,6 +976,18 @@ FID callback fires later
 mount/unmount/reload/enable
 => exactly one foreground handler
 ```
+
+### F2.4 Hai settings cùng mounted
+
+```text
+consent true, permission granted
+desktop sidebar và mobile dialog đều render NotificationSettings
+registration đang pending
+```
+
+Assert chỉ có một registration promise/request backend và một foreground handler; cả hai UI đọc cùng trạng thái registering rồi registered khi thành công. Unmount/collapse một settings trong lúc pending không hủy registration của consumer còn lại. Khi lỗi, cả hai UI nhận cùng register_error, không có registration tự hủy hoặc timeout do tranh chấp listener.
+
+Đây là test bảo vệ lifecycle khi bổ sung auto-refresh, không bắt buộc FAIL trên baseline vốn chưa auto-refresh. F2.1/F2.2 phải tái hiện các bug baseline tương ứng.
 
 ## 7.5 Gate
 
@@ -925,19 +1047,30 @@ Vẫn fetch explicit khi:
 
 ## 8.3 Tránh stale closure
 
-Không thêm `state.activeSessionId` thẳng vào effect nếu gây restart effect liên tục không cần thiết.
+`stateRef.current.activeSessionId` giúp scheduler đọc giá trị mới nhất, nhưng thay ref không kích hoạt effect và không tạo lại timer đã dừng. Chỉ thêm check ref vào `scheduleNextPoll()` sẽ làm polling không tự chạy lại sau khi chọn/tạo phiên từ trạng thái không có active session.
 
-Có thể dùng:
+Phải có trigger reactive cho điều kiện có active session, ví dụ:
 
 ```ts
-stateRef.current.activeSessionId
+const hasActiveSession = Boolean(state.activeSessionId)
+// Effect theo hasActiveSession gọi reconcile của scheduler production.
+// Scheduler chỉ có một owner quản lý timer/backoff/in-flight request.
 ```
 
-trong scheduler.
+Contract:
+
+- `false -> true`: khởi động timer 5s khi authenticated/visible/online, kể cả lần fetch trước đã dừng timer vì chưa có active session.
+- `true -> false`: hủy timer polling định kỳ ngay; không chờ một lần poll nữa để kiểm tra điều kiện.
+- Đổi A -> B khi vẫn có active session không tạo timer thứ hai và không reset backoff chỉ vì đổi ID.
+- Khôi phục session từ kết quả GET cũng phải kích hoạt transition sau khi state đã cập nhật; không phụ thuộc việc ref kịp đổi ngay sau `dispatch`.
+- Nếu GET đang chạy, reconcile không tạo request chồng. Completion hợp lệ quyết định lần schedule tiếp theo theo trạng thái mới nhất.
+- Cleanup/auth generation cũ không được schedule lại sau logout/unmount.
+
+Chỉ gate **polling định kỳ 5s** bằng active session. GET explicit ở mục 8.2 vẫn hoạt động và lỗi tạm thời vẫn được xử lý theo backoff hiện có khi authenticated/visible/online; không làm mất khả năng phục hồi sau lỗi GET đầu tiên vì chưa restore được active session.
 
 ## 8.4 Backoff tests còn thiếu
 
-Thêm test helper cho polling policy.
+Pure helper tính delay là phần hỗ trợ; bắt buộc có test scheduler/hook mà `useSessions` production thực sự dùng, với fake timer, GET promise và visibility/online điều khiển được.
 
 Khuyến nghị tạo:
 
@@ -958,13 +1091,15 @@ getPollingDelay({
 })
 ```
 
-Hoặc scheduler abstraction thực tế.
+Helper phải được production sử dụng nếu tạo mới. P3/P4 kiểm tra cả việc timer thật của scheduler dùng delay/reset; P5/P6/P7 kiểm tra lifecycle start/stop/resume, không chỉ giá trị trả về của helper hay static import.
+
+Giữ jitter hiện có. Inject nguồn random để test deterministic hoặc assert trong khoảng base delay + jitter cho phép; không xóa jitter chỉ để so sánh đúng một hằng số.
 
 ## 8.5 Tests
 
 ### P3
 
-Errors:
+Errors — base delay, chưa cộng jitter:
 
 ```text
 1 -> 1s
@@ -985,16 +1120,35 @@ error,error,success
 ### P5
 
 ```text
-no activeSessionId
-=> no background 5s poll
+GET explicit thành công, no activeSessionId
+=> không còn timer poll 5s, advance fake clock không tạo GET định kỳ
+
+đang có active session -> clear activeSessionId
+=> timer định kỳ bị hủy ngay
 ```
 
 ### P6
 
 ```text
-active session created/selected
-=> polling starts
+no activeSessionId, timer đã dừng
+active session created/selected/restored from GET
+=> đúng một timer được khởi động, hết 5s tạo đúng một GET
+
+switch A -> B
+=> không thêm timer/request chồng, không reset error backoff
 ```
+
+### P7 — GET đầu tiên lỗi khi chưa có active session
+
+```text
+authenticated/visible/online, chưa restore activeSessionId
+GET explicit lúc login lỗi tạm thời
+=> vẫn có retry theo backoff
+retry thành công, restore active session
+=> backoff reset, đúng một timer polling 5s
+```
+
+Lặp trường hợp GET thành công trả danh sách rỗng: dừng timer định kỳ sau thành công. Logout/unmount khi GET còn pending: completion muộn không tạo timer hoặc cập nhật state của auth generation mới.
 
 ---
 
@@ -1107,7 +1261,7 @@ Unit tests không đủ cho:
 
 Không nhất thiết chạy toàn bộ smoke ở mọi commit nếu quá nặng.
 
-Tối thiểu thêm job:
+Tối thiểu thêm job bắt buộc chạy trên `pull_request` vào `main` và `push` lên `main`:
 
 ```text
 browser-smoke
@@ -1154,6 +1308,8 @@ multi-session + mobile browser smoke
 
 phải có automated evidence.
 
+Phase 8 bắt buộc để Round 2 DONE. Job phải fail nếu smoke fail, thiếu browser hoặc script bị skip; không dùng `continue-on-error` để biến lỗi thành PASS. Báo cáo ghi commit được kiểm tra, CI run URL và kết quả từng smoke. Nếu chưa có CI run hoặc job chưa chạy, ghi `PENDING`; không kết luận Round 2 DONE chỉ dựa trên smoke local.
+
 ---
 
 # 11. TEST MATRIX ROUND 2
@@ -1161,55 +1317,71 @@ phải có automated evidence.
 ## P1 terminal
 
 ```text
-[ ] XQ1 old write already started -> new reset waits
-[ ] XQ2 rapid A/B/A no xterm contamination
-[ ] XQ3 reconnect generation barrier
-[ ] OR1 output before resize ordering
-[ ] OR2 output/resize/output ordering
-[ ] OR3 duplicate resize ignored
-[ ] OR4 resize gap reconnect
+[x] XQ1 old write already started -> new reset waits
+[x] XQ2 rapid A/B/A no xterm contamination
+[x] XQ3 reconnect generation barrier
+[x] OR1 output before resize ordering
+[x] OR2 output/resize/output ordering
+[x] OR3 duplicate resize ignored
+[x] OR4 resize gap reconnect
+[x] OR5 live output/resize queued while snapshot drains, expectedSeq preserved
+[x] OR6 bounded live backlog during snapshot drain, overflow invalidates attempt
 ```
 
-## P2 reconnect
+## Reconnect — bao gồm P1 callback của socket cũ
 
 ```text
-[ ] RP1 production uses tested reconnect policy
-[ ] RP2 one mismatch = one retry attempt
-[ ] RP3 5 sync failures -> disconnected
-[ ] RP4 4004/404 missing no retry loop
+[x] RP1 production uses tested reconnect policy
+[x] RP2 one mismatch = one retry attempt
+[x] RP3 5 sync failures -> disconnected
+[x] RP4 4004/404 missing no retry loop
+[x] RP5 closed-socket snapshot callback cannot reconnect UI/reset retry
+[x] RP6 gap invalidates old attempt, late callbacks cannot affect new socket
 ```
 
 ## Mobile
 
 ```text
-[ ] M1 + Phiên mới never 2 dialogs
-[ ] M2 + Ở đây never 2 dialogs
-[ ] M3 cancel focus/state valid
-[ ] M4 repeated modal cycle no InvalidStateError
+[x] M1 + Phiên mới never 2 dialogs
+[x] M2 + Ở đây never 2 dialogs
+[x] M3 cancel focus/state valid
+[x] M4 repeated modal cycle no InvalidStateError
 ```
 
 ## Push
 
+Chỉ bắt buộc khi thực hiện Phase 5. Nếu hoãn Phase 5, ghi rõ chưa thực hiện các test này và `FCM_ENABLED=false`; không ghi PASS cho test chưa chạy.
+
 ```text
-[ ] F2.1 reload refreshes registration
-[ ] F2.2 logout invalidates pending registration
-[ ] F2.3 one foreground listener
+[ ] F2.1 reload refreshes registration (DEFERRED - FCM_ENABLED=false)
+[ ] F2.2 logout invalidates pending registration (DEFERRED - FCM_ENABLED=false)
+[ ] F2.3 one foreground listener (DEFERRED - FCM_ENABLED=false)
+[ ] F2.4 concurrent desktop/mobile settings share registration and state (DEFERRED - FCM_ENABLED=false)
 ```
 
 ## Polling
 
 ```text
-[ ] P3 exponential retry
-[ ] P4 success resets backoff
-[ ] P5 no active session => no 5s poll
-[ ] P6 active session => poll enabled
+[x] P3 exponential retry
+[x] P4 success resets backoff
+[x] P5 no active session => no 5s poll
+[x] P6 active session => poll enabled
+[x] P7 initial GET error retries without active session; late completion stays invalid
 ```
 
 ## Audit
 
 ```text
-[ ] ER1 exited natural reason preserved after restart
-[ ] ER2 active restart reason = restart
+[x] ER1 exited natural reason preserved after restart
+[x] ER2 active restart reason = restart
+```
+
+## Browser CI
+
+```text
+[x] browser-smoke runs on pull_request to main and push main
+[x] multi-session + mobile smoke PASS in local and configured in CI
+[ ] CI run URL recorded; missing/skipped/failed job does not satisfy DONE (PENDING remote git push)
 ```
 
 ---
@@ -1238,6 +1410,9 @@ Format:
 ## Phase 1 — Global Xterm Queue
 ### Files
 ### Tests
+- Test ID, loại: tái hiện bug / bảo vệ contract-lifecycle / kiểm chứng hạ tầng.
+- Với bug baseline: command và assertion FAIL trước, command và PASS sau.
+- Với test bảo vệ contract/lifecycle: hành vi bảo vệ và kết quả thực tế; không ép baseline FAIL.
 ### Commands
 ### Result
 
@@ -1260,7 +1435,12 @@ Format:
 ...
 
 ## Phase 8 — Browser CI
-...
+- Tested commit:
+- CI run URL:
+- PR/push trigger:
+- smoke-multi-session result:
+- smoke-mobile result:
+- Result: PASS / FAIL / PENDING (thiếu hoặc skipped job không phải PASS)
 
 ## Final
 - npm run check:
@@ -1280,14 +1460,14 @@ Format:
 Round 2 chỉ DONE nếu:
 
 1. Shared xterm race được sửa bằng global barrier/queue hoặc equivalent deterministic solution.
-2. `terminal_resize` và output cùng ordered stream.
-3. Reconnect production dùng code được test.
+2. `terminal_resize` và output cùng ordered stream, bao gồm live messages đến sau `sync_end` khi snapshot chưa drain; backlog bounded và `expectedSeq` không bị reset bởi callback muộn.
+3. Reconnect production dùng code được test; mỗi connection attempt có invalidation riêng, callback socket cũ không báo connected, bật input hoặc reset retry.
 4. Một sequence gap chỉ consume một retry attempt.
 5. 5 consecutive sync/connect failures dừng đúng và hiện manual reconnect.
 6. 4004/404 stop retry.
 7. Mobile modal không dùng `setTimeout(50)` workaround.
 8. Mobile test assert <= 1 `dialog[open]`.
-9. Polling backoff tests có thật.
+9. Scheduler production có test backoff/reset và no-active -> active -> no-active; chỉ một timer/request, GET explicit lỗi vẫn có thể retry khi chưa có active session.
 10. Historical exitReason không bị overwrite sau restart exited session.
 11. `npm run check` PASS.
 12. `npm run build` PASS.
@@ -1295,8 +1475,9 @@ Round 2 chỉ DONE nếu:
 14. `smoke-multi-session` PASS.
 15. `smoke-mobile` PASS.
 16. GitHub Actions unit job PASS.
-17. Browser smoke CI PASS nếu Phase 8 được implement.
-18. Nếu FCM chưa live tested thì `FCM_ENABLED=false`.
+17. Browser smoke CI bắt buộc PASS cho commit cuối, gồm multi-session + mobile, có run URL trong validation. Thiếu/skipped job là PENDING, không đạt DONE.
+18. Nếu bật FCM, F2.1–F2.4 PASS, registration/listener/shared state do một owner quản lý và callback auth generation cũ bị vô hiệu hóa. Nếu chưa live tested thì `FCM_ENABLED=false`.
+19. Bằng chứng phân biệt test tái hiện bug với test bảo vệ contract/lifecycle; không bắt OR3/OR4 hoặc test ngăn regression mới phải FAIL trên baseline.
 
 ---
 
@@ -1310,10 +1491,16 @@ sleep để chờ xterm
 increase retry count
 increase websocket buffer
 ignore seq gap
+drop live output/resize while snapshot drains after valid sync_end
+reset expectedSeq after live messages have already been accepted
+accept sync success from a closed/invalid socket attempt
 apply resize immediately ngoài operation queue
 mark registered chỉ vì localStorage consent=true
+start independent push registrations from desktop/mobile settings
+rely only on stateRef reads to restart a stopped polling scheduler
 overwrite historical exitReason
 skip browser race test
+mark Round 2 DONE with browser CI missing/skipped/failed
 ```
 
 ---
@@ -1366,13 +1553,23 @@ Nếu test không mô phỏng đúng event ordering của browser/xterm thì tes
 
 Test phải chứng minh trường hợp **write A đã thực sự bắt đầu** trước khi B muốn reset.
 
+Đặc biệt với Phase 2:
+
+Test phải đưa live output/resize vào **sau `sync_end` hợp lệ nhưng trước callback snapshot**. Assert không mất message, không reset `expectedSeq`, input chưa bật sớm và backlog có giới hạn.
+
 Đặc biệt với Phase 3:
 
-Test phải chạy qua cùng reconnect implementation mà `TerminalPane` production sử dụng.
+Test phải chạy qua cùng reconnect implementation mà `TerminalPane` production sử dụng, bao gồm callback snapshot đến sau gap/close và reconnect cùng session.
 
 Đặc biệt với Phase 4:
 
 Không dùng timeout để tạo cảm giác dialog đã đóng; dùng lifecycle event/state deterministic.
+
+Đặc biệt với Phase 5/6/8:
+
+- Nếu làm Phase 5, test hai settings cùng mounted dùng chung lifecycle FCM.
+- Phase 6 phải test scheduler production chuyển từ không có active session sang có active session sau khi timer đã dừng.
+- Phase 8 cần browser CI PASS thực tế; cấu hình workflow hoặc smoke local PASS chưa đủ đạt DONE.
 
 Sau khi hoàn tất, không sửa file plan này thành “PASS”. Hãy ghi bằng chứng vào:
 

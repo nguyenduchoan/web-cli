@@ -52,6 +52,11 @@ export function SessionManager({
     { agentId?: string; projectId?: string; subpath?: string; workingDirectoryId?: string } | undefined
   >();
 
+  const pendingNewSessionRef = useRef<{
+    prefill?: { agentId?: string; projectId?: string; subpath?: string; workingDirectoryId?: string };
+    returnToSessionManagerOnCancel?: boolean;
+  } | null>(null);
+
   // Handle native dialog open / close for mobile sheet
   useEffect(() => {
     const dialog = mobileDialogRef.current;
@@ -68,20 +73,30 @@ export function SessionManager({
     }
   }, [isMobileSheetOpen]);
 
+  const handleMobileDialogClose = () => {
+    onCloseMobileSheet();
+    const pending = pendingNewSessionRef.current;
+    if (pending) {
+      pendingNewSessionRef.current = null;
+      setNewDialogPrefill(pending.prefill);
+      setIsNewDialogOpen(true);
+    }
+  };
+
   const handleOpenNewSession = (prefill?: {
     agentId?: string;
     projectId?: string;
     subpath?: string;
     workingDirectoryId?: string;
   }) => {
-    setNewDialogPrefill(prefill);
     if (isMobileSheetOpen) {
+      pendingNewSessionRef.current = {
+        prefill,
+        returnToSessionManagerOnCancel: true
+      };
       onCloseMobileSheet();
-      // Ensure mobile sheet dialog has closed before opening new dialog
-      setTimeout(() => {
-        setIsNewDialogOpen(true);
-      }, 50);
     } else {
+      setNewDialogPrefill(prefill);
       setIsNewDialogOpen(true);
     }
   };
@@ -171,6 +186,7 @@ export function SessionManager({
         ref={mobileDialogRef}
         className="mobile-session-sheet lg:hidden"
         onCancel={onCloseMobileSheet}
+        onClose={handleMobileDialogClose}
         onClick={(e) => {
           if (e.target === mobileDialogRef.current) onCloseMobileSheet();
         }}

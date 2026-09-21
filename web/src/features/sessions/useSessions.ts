@@ -3,6 +3,7 @@ import * as api from "../../lib/api";
 import type { Session } from "../../lib/types";
 import { initialSessionsState, sessionsReducer } from "./sessionReducer";
 import type { AttentionEvent, ConnectionState, SessionsAction, SessionsState } from "./sessionTypes";
+import { SessionPollingScheduler } from "../../lib/pollingPolicy";
 
 const ACTIVE_SESSION_STORAGE_KEY = "web-cli-active-session";
 
@@ -19,10 +20,19 @@ export function useSessions({ token, isAuthenticated }: UseSessionsOptions) {
   const authGenRef = useRef<number>(0);
   const inputBlockedRef = useRef<boolean>(false);
   const isFetchingListRef = useRef<boolean>(false);
-  const retryCountRef = useRef<number>(0);
-  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const stateRef = useRef<SessionsState>(state);
   stateRef.current = state;
+
+  const schedulerRef = useRef<SessionPollingScheduler | null>(null);
+  if (!schedulerRef.current) {
+    schedulerRef.current = new SessionPollingScheduler({
+      fetchSessions: async () => {
+        await fetchSessions();
+      },
+      hasActiveSession: () => Boolean(stateRef.current.activeSessionId),
+      isAuthenticated: () => isAuthenticated
+    });
+  }
 
   // Track auth generation on auth change
   useEffect(() => {
@@ -93,7 +103,6 @@ export function useSessions({ token, isAuthenticated }: UseSessionsOptions) {
       const response = await api.listSessions(token);
       if (authGenRef.current !== currentAuthGen) return;
 
-      retryCountRef.current = 0; // Reset retry counter on success
       const serverEpoch = response.serverEpoch ?? stateRef.current.serverEpoch ?? "epoch-1";
       const registryRevision = response.registryRevision ?? stateRef.current.registryRevision;
 
@@ -166,79 +175,41 @@ export function useSessions({ token, isAuthenticated }: UseSessionsOptions) {
     }
   }, [isAuthenticated, token, switchSession]);
 
+  const hasActiveSession = Boolean(state.activeSessionId);
+
   // Polling loop: single owner of scheduling and backoff
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated) {
+      schedulerRef.current?.stop();
+      return;
+    }
 
-    let active = true;
-
-    const scheduleNextPoll = (isError = false) => {
-      clearTimeout(pollTimerRef.current);
-      if (!active) return;
-
-      const isVisible = document.visibilityState === "visible";
-      const isOnline = navigator.onLine;
-
-      if (!isVisible || !isOnline || !isAuthenticated) return;
-
-      let delayMs = 5000;
-      if (isError) {
-        retryCountRef.current = Math.min(retryCountRef.current + 1, 5);
-        const baseMs = [1000, 2000, 4000, 8000, 15000][retryCountRef.current - 1] ?? 15000;
-        const jitterMs = Math.random() * 0.2 * baseMs;
-        delayMs = baseMs + jitterMs;
-      } else {
-        retryCountRef.current = 0;
-      }
-
-      pollTimerRef.current = setTimeout(async () => {
-        if (!active) return;
-        let failed = false;
-        try {
-          await fetchSessions();
-        } catch {
-          failed = true;
-        }
-        if (active) scheduleNextPoll(failed);
-      }, delayMs);
-    };
+    const scheduler = schedulerRef.current!;
+    scheduler.start();
 
     const handleVisibilityOrOnline = () => {
-      if (document.visibilityState === "visible" && navigator.onLine && isAuthenticated) {
-        retryCountRef.current = 0;
-        clearTimeout(pollTimerRef.current);
-        void fetchSessions().then(
-          () => {
-            if (active) scheduleNextPoll(false);
-          },
-          () => {
-            if (active) scheduleNextPoll(true);
-          }
-        );
-      }
+      void scheduler.triggerImmediateRefresh();
     };
 
     document.addEventListener("visibilitychange", handleVisibilityOrOnline);
     window.addEventListener("online", handleVisibilityOrOnline);
     window.addEventListener("focus", handleVisibilityOrOnline);
 
-    void fetchSessions().then(
-      () => {
-        if (active) scheduleNextPoll(false);
-      },
-      () => {
-        if (active) scheduleNextPoll(true);
-      }
-    );
+    void scheduler.executeFetch();
 
     return () => {
-      active = false;
-      clearTimeout(pollTimerRef.current);
+      scheduler.stop();
       document.removeEventListener("visibilitychange", handleVisibilityOrOnline);
       window.removeEventListener("online", handleVisibilityOrOnline);
       window.removeEventListener("focus", handleVisibilityOrOnline);
     };
-  }, [isAuthenticated, fetchSessions]);
+  }, [isAuthenticated]);
+
+  // Reactive trigger for activeSession transition (Section 8.3)
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    schedulerRef.current?.reconcileActiveSession(hasActiveSession);
+  }, [hasActiveSession, isAuthenticated]);
 
   // Mutations
   const createNewSession = useCallback(

@@ -1,10 +1,11 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
-import { ApiError, buildWsUrl, createWsTicket } from "../lib/api";
 import { installTerminalTouchScroll } from "../lib/terminalTouchScroll";
-import { TerminalSyncController } from "../lib/terminalSync";
-import type { ServerMessageV2, Session } from "../lib/types";
+import { ReconnectManager } from "../lib/reconnectPolicy";
+import { TerminalConnectionSession } from "../lib/terminalConnection";
+import { XtermOperationQueue } from "../lib/xtermOperationQueue";
+import type { Session } from "../lib/types";
 
 export type TerminalPaneHandle = {
   sendInput: (data: string) => boolean;
@@ -43,14 +44,12 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | undefined>(undefined);
+  const queueRef = useRef<XtermOperationQueue>(new XtermOperationQueue());
+  const connSessionRef = useRef<TerminalConnectionSession | undefined>(undefined);
   const resizeRef = useRef<(force?: boolean) => void>(() => {});
   const stopScrollRef = useRef<() => void>(() => {});
-  const wsRef = useRef<WebSocket | undefined>(undefined);
 
   const roleRef = useRef<"controller" | "viewer">("viewer");
-  const syncCompleteRef = useRef<boolean>(false);
-  const expectedSeqRef = useRef<number>(0);
-  const syncIdRef = useRef<string>("");
   const sessionIdRef = useRef<string | undefined>(session?.id);
   sessionIdRef.current = session?.id;
 
@@ -59,16 +58,13 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
   const [syncing, setSyncing] = useState<boolean>(false);
 
   function send(payload: unknown): boolean {
-    const ws = wsRef.current;
-    if (ws?.readyState !== WebSocket.OPEN) return false;
-    ws.send(JSON.stringify(payload));
-    return true;
+    return connSessionRef.current?.send(payload) ?? false;
   }
 
   useImperativeHandle(ref, () => ({
     sendInput(data) {
       stopScrollRef.current();
-      if (!connected || !syncCompleteRef.current) {
+      if (!connected || !connSessionRef.current?.syncComplete) {
         onError("Chưa kết nối hoặc đang đồng bộ dữ liệu.");
         return false;
       }
@@ -142,7 +138,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       if (document.visibilityState === "hidden" || !container?.clientWidth || !container.clientHeight) return;
 
       // Only controller resizes server PTY
-      if (roleRef.current !== "controller" || !syncCompleteRef.current) return;
+      if (roleRef.current !== "controller" || !connSessionRef.current?.syncComplete) return;
 
       const dimensions = fit.proposeDimensions();
       if (!dimensions || !Number.isFinite(dimensions.cols) || !Number.isFinite(dimensions.rows)) return;
@@ -176,7 +172,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     resize();
 
     const data = terminal.onData((value) => {
-      if (!syncCompleteRef.current || roleRef.current !== "controller") return;
+      if (!connSessionRef.current?.syncComplete || roleRef.current !== "controller") return;
       if (!send({ type: "input", data: value })) {
         onError("Chưa kết nối. Phím vừa nhập chưa được gửi.");
       }
@@ -205,6 +201,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
 
   useEffect(() => {
     const terminal = termRef.current;
+    const queue = queueRef.current;
     stopScrollRef.current();
 
     if (!terminal || !session) {
@@ -215,304 +212,125 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       return;
     }
 
-    let stopped = false;
-    let connecting = false;
-    let attempt = 0;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let heartbeat: ReturnType<typeof setInterval> | undefined;
-    let lastMessage = Date.now();
-
+    let disposed = false;
     const currentSessionId = session.id;
-    const currentGen = connectionGeneration;
 
-    const MAX_RECONNECT_ATTEMPTS = 5;
-    const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 15000];
+    // Switch flow:
+    // 1. block input synchronously
+    setConnected(false);
+    setSyncing(false);
+    onConnectedChange(false, roleRef.current);
 
-    const schedule = () => {
-      if (stopped) return;
-      clearTimeout(timer);
+    // 2. invalidate old connection/controller
+    connSessionRef.current?.dispose();
+    connSessionRef.current = undefined;
 
-      if (attempt >= MAX_RECONNECT_ATTEMPTS) {
-        stopped = true;
-        connecting = false;
-        setConnected(false);
-        setSyncing(false);
-        syncCompleteRef.current = false;
-        onConnectedChange(false, roleRef.current);
-        onReconnectExhausted?.(currentSessionId);
+    // 3. mark old xterm generation stale
+    queue.invalidate();
+
+    // 4. await global xterm write barrier
+    void (async () => {
+      await queue.barrier();
+      if (disposed || sessionIdRef.current !== currentSessionId) {
         return;
       }
 
-      const baseDelay = RECONNECT_DELAYS[attempt] ?? 15_000;
-      attempt += 1;
-      const delay = baseDelay + Math.random() * 400;
-      timer = setTimeout(() => void connect(), delay);
-    };
+      // 5. only then: reset xterm and attach/sync new session
+      terminal.reset();
 
-    const syncCtrl = new TerminalSyncController({
-      sessionId: currentSessionId,
-      generation: currentGen,
-      writeTerminal: (data) =>
-        new Promise<void>((resolve) => {
-          if (stopped || sessionIdRef.current !== currentSessionId) {
-            resolve();
-            return;
-          }
-          terminal!.write(data, () => resolve());
-        }),
-      resetTerminal: () => {
-        terminal!.reset();
-      },
-      resizeTerminal: (cols, rows) => {
-        terminal!.resize(cols, rows);
-      },
-      onSyncComplete: (syncedRole) => {
-        if (stopped || sessionIdRef.current !== currentSessionId) return;
-        attempt = 0;
-        syncCompleteRef.current = true;
-        roleRef.current = syncedRole;
-        setRole(syncedRole);
-        setSyncing(false);
-        setConnected(true);
-        onConnectedChange(true, syncedRole);
-        if (syncedRole === "controller") {
-          resizeRef.current(true);
-        }
-      },
-      onMismatchOrGap: () => {
-        if (stopped || sessionIdRef.current !== currentSessionId) return;
-        wsRef.current?.close();
-        schedule();
-      }
-    });
-
-    async function connect() {
-      if (stopped || connecting || wsRef.current?.readyState === WebSocket.OPEN) return;
-      connecting = true;
-      setConnected(false);
-      onConnectedChange(false, roleRef.current);
-
-      try {
-        const { ticket } = await createWsTicket("", currentSessionId, { protocolVersion: 2 });
-        if (stopped || sessionIdRef.current !== currentSessionId) return;
-
-        const ws = new WebSocket(buildWsUrl(currentSessionId), ["web-cli", `ticket.${ticket}`]);
-        wsRef.current = ws;
-
-        const openTimeout = setTimeout(() => ws.close(), 10_000);
-
-        ws.addEventListener("open", () => {
-          clearTimeout(openTimeout);
-          if (stopped || wsRef.current !== ws || sessionIdRef.current !== currentSessionId) {
-            ws.close();
-            return;
-          }
-          connecting = false;
-          lastMessage = Date.now();
-          stopScrollRef.current();
-
-          clearInterval(heartbeat);
-          heartbeat = setInterval(() => {
-            if (Date.now() - lastMessage > 35_000) ws.close();
-            else send({ type: "ping" });
-          }, 15_000);
-        });
-
-        ws.addEventListener("message", (event) => {
-          if (stopped || wsRef.current !== ws || sessionIdRef.current !== currentSessionId) return;
-          lastMessage = Date.now();
-
-          try {
-            const message = JSON.parse(String(event.data)) as ServerMessageV2;
-
-            switch (message.type) {
-              case "sync_start": {
-                syncCompleteRef.current = false;
-                setSyncing(true);
-                setConnected(false);
-                roleRef.current = message.control;
-                setRole(message.control);
-                onConnectedChange(false, message.control);
-                syncCtrl.handleSyncStart(message);
-                break;
-              }
-
-              case "snapshot_chunk": {
-                syncCtrl.handleSnapshotChunk(message);
-                break;
-              }
-
-              case "sync_end": {
-                void syncCtrl.handleSyncEnd(message);
-                break;
-              }
-
-              case "output": {
-                syncCtrl.handleOutput(message);
-                break;
-              }
-
-              case "terminal_resize": {
-                syncCtrl.handleTerminalResize(message);
-                break;
-              }
-
-              case "control": {
-                syncCtrl.role = message.role;
-                roleRef.current = message.role;
-                setRole(message.role);
-                onConnectedChange(syncCtrl.syncComplete, message.role);
-                if (message.role === "controller" && syncCtrl.syncComplete) {
-                  resizeRef.current(true);
-                }
-                break;
-              }
-
-              case "state": {
-                onSessionUpdate(message.session, message.registryRevision, message.serverEpoch);
-                break;
-              }
-
-              case "exit": {
-                terminal!.writeln(`\r\n[Phiên đã kết thúc: ${message.exitCode ?? "—"}]`);
-                if (message.session) {
-                  onSessionUpdate(message.session, message.registryRevision, message.serverEpoch);
-                }
-                break;
-              }
-
-              case "removed": {
-                terminal!.writeln("\r\n[Phiên đã bị xóa khỏi máy chủ]");
-                break;
-              }
-
-              case "attention": {
-                onAttention?.({
-                  sessionId: message.sessionId,
-                  eventId: message.eventId,
-                  createdAt: message.createdAt
-                });
-                break;
-              }
-
-              case "error": {
-                if (message.code === "control_locked") {
-                  onError("Chỉ xem — phiên đang được điều khiển ở thiết bị khác");
-                } else {
-                  onError(message.message);
-                }
-                break;
-              }
-
-              case "pong":
-                break;
-
-              default: {
-                // Fallback for v1 legacy output message
-                const legacy = message as unknown as { type: string; data?: string; session?: Session };
-                if (legacy.type === "output" && legacy.data) {
-                  terminal!.write(legacy.data);
-                } else if (legacy.type === "state" && legacy.session) {
-                  onSessionUpdate(legacy.session);
-                }
-                break;
-              }
-            }
-          } catch {
-            onError("Không đọc được dữ liệu terminal.");
-          }
-        });
-
-        ws.addEventListener("close", (event) => {
-          clearTimeout(openTimeout);
-          clearInterval(heartbeat);
-          if (stopped || wsRef.current !== ws || sessionIdRef.current !== currentSessionId) return;
-
-          wsRef.current = undefined;
-          connecting = false;
-          setConnected(false);
-          setSyncing(false);
-          syncCompleteRef.current = false;
-          onConnectedChange(false, roleRef.current);
-
-          if (event.code === 4001) {
-            stopped = true;
+      const connectionSession = new TerminalConnectionSession({
+        sessionId: currentSessionId,
+        queue,
+        reconnectManager: new ReconnectManager(),
+        callbacks: {
+          onConnectedChange: (isConnected, currentRole) => {
+            if (disposed || sessionIdRef.current !== currentSessionId) return;
+            setConnected(isConnected);
+            onConnectedChange(isConnected, currentRole);
+          },
+          onRoleChange: (newRole) => {
+            if (disposed || sessionIdRef.current !== currentSessionId) return;
+            roleRef.current = newRole;
+            setRole(newRole);
+          },
+          onSyncingChange: (isSyncing) => {
+            if (disposed || sessionIdRef.current !== currentSessionId) return;
+            setSyncing(isSyncing);
+          },
+          onResizeRequired: () => {
+            if (disposed || sessionIdRef.current !== currentSessionId) return;
+            resizeRef.current(true);
+          },
+          onSessionUpdate: (s, regRev, sEpoch) => {
+            if (disposed || sessionIdRef.current !== currentSessionId) return;
+            onSessionUpdate(s, regRev, sEpoch);
+          },
+          onAttention: (evt) => {
+            if (disposed || sessionIdRef.current !== currentSessionId) return;
+            onAttention?.(evt);
+          },
+          onError: (errMsg) => {
+            if (disposed || sessionIdRef.current !== currentSessionId) return;
+            onError(errMsg);
+          },
+          onSessionMissing: (sId) => {
+            if (disposed || sessionIdRef.current !== currentSessionId) return;
+            onSessionMissing?.(sId);
+          },
+          onReconnectExhausted: (sId) => {
+            if (disposed || sessionIdRef.current !== currentSessionId) return;
+            onReconnectExhausted?.(sId);
+          },
+          onAuthExpired: () => {
             window.dispatchEvent(new Event("web-cli-auth-expired"));
-            return;
+          },
+          writeTerminal: (data) =>
+            new Promise<void>((resolve) => {
+              if (disposed || sessionIdRef.current !== currentSessionId) {
+                resolve();
+                return;
+              }
+              terminal.write(data, resolve);
+            }),
+          resetTerminal: () => {
+            terminal.reset();
+          },
+          resizeTerminal: (cols, rows) => {
+            terminal.resize(cols, rows);
+          },
+          writelnTerminal: (data) => {
+            terminal.writeln(data);
           }
-          if (event.code === 4004) {
-            stopped = true;
-            onSessionMissing?.(currentSessionId);
-            return;
-          }
-          if (event.code === 4003) {
-            stopped = true;
-            onError("Không có quyền truy cập phiên (403)");
-            return;
-          }
-          schedule();
-        });
-
-        ws.addEventListener("error", () => ws.close());
-      } catch (error) {
-        if (!stopped && sessionIdRef.current === currentSessionId) {
-          connecting = false;
-          setConnected(false);
-          setSyncing(false);
-          syncCompleteRef.current = false;
-          onConnectedChange(false, roleRef.current);
-
-          if (error instanceof ApiError) {
-            if (error.status === 404 || error.code === "unknown_session") {
-              stopped = true;
-              onSessionMissing?.(currentSessionId);
-              return;
-            }
-            if (error.status === 401) {
-              stopped = true;
-              return;
-            }
-            if (error.status === 403) {
-              stopped = true;
-              onError(error.message || "Không có quyền truy cập phiên (403)");
-              return;
-            }
-          }
-
-          onError(error instanceof Error ? error.message : "Mất kết nối.");
-          schedule();
         }
-      }
-    }
+      });
+
+      connSessionRef.current = connectionSession;
+      connectionSession.start();
+    })();
 
     const resume = () => {
       if (document.visibilityState === "hidden") return;
       resizeRef.current(true);
-      if (wsRef.current?.readyState === WebSocket.OPEN && Date.now() - lastMessage > 35_000) {
-        wsRef.current.close();
-      } else if (!connecting) {
-        clearTimeout(timer);
-        void connect();
+      const conn = connSessionRef.current;
+      if (conn?.ws?.readyState === WebSocket.OPEN && Date.now() - conn["lastMessageTime"] > 35_000) {
+        conn.ws.close();
+      } else if (conn && !conn.connecting && !conn.connected && !conn.stopped) {
+        void conn.connect();
       }
     };
 
     window.addEventListener("online", resume);
     document.addEventListener("visibilitychange", resume);
 
-    void connect();
-
     return () => {
-      stopped = true;
-      syncCtrl.invalidate();
-      clearTimeout(timer);
-      clearInterval(heartbeat);
+      disposed = true;
+      connSessionRef.current?.dispose();
+      connSessionRef.current = undefined;
+      queue.invalidate();
       window.removeEventListener("online", resume);
       document.removeEventListener("visibilitychange", resume);
-      wsRef.current?.close();
-      wsRef.current = undefined;
       setConnected(false);
       setSyncing(false);
-      syncCompleteRef.current = false;
       onConnectedChange(false, roleRef.current);
     };
   }, [

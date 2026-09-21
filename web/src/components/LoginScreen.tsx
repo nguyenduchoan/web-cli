@@ -63,7 +63,7 @@ export function LoginScreen({ setupRequired, trustedDevice, hubEnabled, onLogin,
             <input autoComplete="off" type="password" value={setupCode} onChange={(e) => setSetupCode(e.target.value)} required />
             <span className="text-xs font-normal text-zinc-400">Mã do chủ máy lấy từ tệp thiết lập riêng trên máy chủ.</span>
           </label>}
-          {(!trustedDevice || setupRequired) && <><label className="field-label">Tài khoản<input name="username" autoComplete="username" autoCapitalize="none" spellCheck={false} value={username} onChange={(e) => setUsername(e.target.value)} required pattern={setupRequired ? "[a-zA-Z0-9_.-]{3,40}" : undefined} maxLength={40} /></label>
+          {(!trustedDevice || setupRequired) && <><label className="field-label">Tài khoản<input name="username" autoComplete="username" autoCapitalize="none" spellCheck={false} value={username} onChange={(e) => setUsername(e.target.value)} required pattern={setupRequired ? "[a-zA-Z0-9._\\-]{3,40}" : undefined} maxLength={40} /></label>
           <label className="field-label">Mật khẩu{setupRequired ? " (ít nhất 12 ký tự)" : ""}<input name="password" type="password" autoComplete={setupRequired ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} required minLength={setupRequired ? 12 : undefined} maxLength={256} /></label></>}
         </>}
         {(!setupRequired || enrollment) && <label className="field-label">{recoveryMode ? "Mã khôi phục" : "Mã xác thực sáu số"}<input name="code" inputMode={recoveryMode ? "text" : "numeric"} autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)} required pattern={recoveryMode ? undefined : "[0-9]{6}"} maxLength={recoveryMode ? 40 : 6} /></label>}

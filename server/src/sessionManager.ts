@@ -388,7 +388,7 @@ export class SessionManager {
       }
       this.reservedSlots++;
       previous.restartLock = true;
-      previous.exitReason = "restart";
+      // Preserve historical exitReason of exited/error sessions
     }
 
     try {

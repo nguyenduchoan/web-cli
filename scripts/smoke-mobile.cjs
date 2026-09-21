@@ -367,6 +367,86 @@ async function main() {
       "Session reconnected"
     );
 
+    // Phase 4 - Mobile Modal Lifecycle tests (M1, M2, M3, M4)
+    const checkDialogCount = async () => {
+      const count = await page.evaluate(() => document.querySelectorAll("dialog[open]").length);
+      assert.ok(count <= 1, `Expected <= 1 open dialog at all times, got ${count}`);
+      return count;
+    };
+
+    // M1: Open mobile sheet -> click "+ Phiên mới" -> verify no stacked dialogs
+    await page.click('[aria-label="Mở danh sách phiên"]');
+    await page.waitForSelector("dialog.mobile-session-sheet[open]", { timeout: 5000 });
+    await checkDialogCount();
+
+    await page.click('dialog.mobile-session-sheet [aria-label="Tạo phiên mới"]');
+    await page.waitForSelector("dialog.new-session-dialog[open]", { timeout: 5000 });
+    const countM1 = await checkDialogCount();
+    assert.equal(countM1, 1, "Exactly one dialog open after opening New Session from mobile sheet");
+
+    // M3: Cancel New Session -> no stacked dialog, focus valid
+    await page.evaluate(() => {
+      const dialog = document.querySelector("dialog.new-session-dialog");
+      const cancelBtn = Array.from(dialog?.querySelectorAll("button") || []).find((b) => b.textContent.trim() === "Hủy");
+      if (cancelBtn) cancelBtn.click();
+    });
+    await page.waitForFunction(() => document.querySelectorAll("dialog[open]").length === 0, { timeout: 5000 });
+    const countAfterCancel = await checkDialogCount();
+    assert.equal(countAfterCancel, 0, "All dialogs closed after cancel");
+    const activeTagName = await page.evaluate(() => document.activeElement?.tagName);
+    assert.ok(activeTagName, "Focus remains valid after cancel");
+
+    // M2: Open mobile sheet -> click "+ Ở đây" -> verify no stacked dialogs
+    await page.click('[aria-label="Mở danh sách phiên"]');
+    await page.waitForSelector("dialog.mobile-session-sheet[open]", { timeout: 5000 });
+    await checkDialogCount();
+
+    const clickedAtFolder = await page.evaluate(() => {
+      const sheet = document.querySelector("dialog.mobile-session-sheet");
+      const atFolderBtn = Array.from(sheet?.querySelectorAll("button") || []).find((b) => b.textContent.includes("+ Ở đây"));
+      if (atFolderBtn) {
+        atFolderBtn.click();
+        return true;
+      }
+      return false;
+    });
+    if (clickedAtFolder) {
+      await page.waitForSelector("dialog.new-session-dialog[open]", { timeout: 5000 });
+      const countM2 = await checkDialogCount();
+      assert.equal(countM2, 1, "Exactly one dialog open after + Ở đây");
+      // Close new session dialog
+      await page.evaluate(() => {
+        const dialog = document.querySelector("dialog.new-session-dialog");
+        const cancelBtn = Array.from(dialog?.querySelectorAll("button") || []).find((b) => b.textContent.trim() === "Hủy");
+        if (cancelBtn) cancelBtn.click();
+      });
+      await page.waitForFunction(() => document.querySelectorAll("dialog[open]").length === 0, { timeout: 5000 });
+    }
+
+    // M4: Repeated modal open/close loop (20 cycles) without InvalidStateError or pageerror
+    for (let cycle = 0; cycle < 20; cycle++) {
+      await page.click('[aria-label="Mở danh sách phiên"]');
+      await page.waitForSelector("dialog.mobile-session-sheet[open]", { timeout: 3000 });
+      await checkDialogCount();
+
+      // Click + Phiên mới
+      await page.click('dialog.mobile-session-sheet [aria-label="Tạo phiên mới"]');
+      await page.waitForSelector("dialog.new-session-dialog[open]", { timeout: 3000 });
+      await checkDialogCount();
+
+      // Close New Session dialog
+      await page.evaluate(() => {
+        const dialog = document.querySelector("dialog.new-session-dialog");
+        const closeBtn = dialog?.querySelector('[aria-label="Đóng dialog tạo phiên mới"]') ||
+          Array.from(dialog?.querySelectorAll("button") || []).find((b) => b.textContent.trim() === "Hủy");
+        if (closeBtn) closeBtn.click();
+      });
+      await page.waitForFunction(() => document.querySelectorAll("dialog[open]").length === 0, { timeout: 3000 });
+      await checkDialogCount();
+    }
+
+    assert.equal(errors.length, 0, `Expected 0 page errors during modal cycles, got: ${errors.join("; ")}`);
+
     await page.close();
 
     // Desktop view test

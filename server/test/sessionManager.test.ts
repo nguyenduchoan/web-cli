@@ -593,3 +593,93 @@ test("S15: retention limit of 50 oldest exited/error sessions evicted with remov
   await manager.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
+
+test("ER1: restarting already exited session preserves historical exitReason (natural)", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "er1-"));
+  const testProject: ProjectConfig = { id: "p-er1", label: "proj-er1", path: tmpDir };
+  const manager = new SessionManager(config({ maxSessions: 2 }), logger);
+
+  const agent: AgentConfig = {
+    id: "shell",
+    label: "Terminal",
+    command: process.execPath,
+    args: [fixtureAgentPath],
+    quickActions: { yesAll: "", skip: "", editFirst: "" }
+  };
+
+  const s = manager.createSession({ agent, project: testProject });
+
+  // Cause natural exit
+  manager.writeInput(s.id, "EXIT:0\n");
+  for (let i = 0; i < 50; i++) {
+    if (manager.getSession(s.id)?.state === "exited") break;
+    await delay(20);
+  }
+
+  const exitedSession = manager.getSession(s.id);
+  assert.equal(exitedSession?.state, "exited");
+  assert.equal(exitedSession?.exitReason, "natural", "Pre-restart exitReason must be natural");
+
+  // Restart already exited session
+  const restartResult = await manager.restartSession(s.id);
+  const oldSessionAfterRestart = manager.getSession(s.id);
+  const replacementSession = manager.getSession(restartResult.session.id);
+
+  assert.equal(
+    oldSessionAfterRestart?.exitReason,
+    "natural",
+    "Historical exitReason must remain natural after restart"
+  );
+  assert.equal(
+    oldSessionAfterRestart?.replacementSessionId,
+    restartResult.session.id,
+    "Old session must link to replacementSessionId"
+  );
+  assert.equal(
+    replacementSession?.replacedFromSessionId,
+    s.id,
+    "New session must link back to old session via replacedFromSessionId"
+  );
+
+  await manager.close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("ER2: restarting active running session marks old session exitReason as restart", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "er2-"));
+  const testProject: ProjectConfig = { id: "p-er2", label: "proj-er2", path: tmpDir };
+  const manager = new SessionManager(config({ maxSessions: 2 }), logger);
+
+  const agent: AgentConfig = {
+    id: "shell",
+    label: "Terminal",
+    command: process.execPath,
+    args: [fixtureAgentPath],
+    quickActions: { yesAll: "", skip: "", editFirst: "" }
+  };
+
+  const s = manager.createSession({ agent, project: testProject });
+  assert.equal(manager.getSession(s.id)?.state, "running");
+
+  // Restart active running session
+  const restartResult = await manager.restartSession(s.id);
+  const oldSessionAfterRestart = manager.getSession(s.id);
+  const replacementSession = manager.getSession(restartResult.session.id);
+
+  assert.equal(
+    oldSessionAfterRestart?.exitReason,
+    "restart",
+    "Active session stopped by restart must have exitReason=restart"
+  );
+  assert.equal(
+    oldSessionAfterRestart?.replacementSessionId,
+    restartResult.session.id
+  );
+  assert.equal(
+    replacementSession?.replacedFromSessionId,
+    s.id
+  );
+
+  await manager.close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});

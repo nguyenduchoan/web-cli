@@ -59,9 +59,15 @@ export function NewSessionDialog({
       }
       setSessionName("");
       setError("");
-      dialogRef.current?.showModal();
+      const dialog = dialogRef.current;
+      if (dialog && !dialog.open) {
+        dialog.showModal();
+      }
     } else {
-      dialogRef.current?.close();
+      const dialog = dialogRef.current;
+      if (dialog && dialog.open) {
+        dialog.close();
+      }
     }
   }, [isOpen, prefill, projects, agents]);
 

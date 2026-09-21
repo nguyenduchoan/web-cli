@@ -1,11 +1,17 @@
+import { XtermOperationQueue } from "./xtermOperationQueue.js";
+
+export const DEFAULT_MAX_LIVE_BACKLOG_BYTES = 1_000_000;
+
 export type TerminalSyncOptions = {
   sessionId: string;
   generation: number;
+  queue?: XtermOperationQueue;
   writeTerminal: (data: string) => Promise<void>;
   resetTerminal: () => void;
   resizeTerminal: (cols: number, rows: number) => void;
   onSyncComplete: (role: "controller" | "viewer") => void;
   onMismatchOrGap: (reason: string) => void;
+  maxLiveBacklogBytes?: number;
 };
 
 export type SyncStartMessage = {
@@ -42,6 +48,9 @@ export type ResizeMessage = {
 export class TerminalSyncController {
   public sessionId: string;
   public generation: number;
+  public queue: XtermOperationQueue;
+  public readonly maxLiveBacklogBytes: number;
+
   private writeTerminal: (data: string) => Promise<void>;
   private resetTerminal: () => void;
   private resizeTerminal: (cols: number, rows: number) => void;
@@ -49,18 +58,21 @@ export class TerminalSyncController {
   private onMismatchOrGap: (reason: string) => void;
 
   public syncId = "";
+  public baseSeq = 0;
   public expectedChunkIndex = 0;
   public expectedSeq = 0;
+  public syncEndReceived = false;
   public syncComplete = false;
   public isSyncing = false;
+  public liveBacklogBytes = 0;
   public role: "controller" | "viewer" = "viewer";
   public lastGrid: { cols: number; rows: number } = { cols: 80, rows: 24 };
-
-  private writeChain: Promise<void> = Promise.resolve();
 
   constructor(options: TerminalSyncOptions) {
     this.sessionId = options.sessionId;
     this.generation = options.generation;
+    this.queue = options.queue ?? new XtermOperationQueue(options.generation);
+    this.maxLiveBacklogBytes = options.maxLiveBacklogBytes ?? DEFAULT_MAX_LIVE_BACKLOG_BYTES;
     this.writeTerminal = options.writeTerminal;
     this.resetTerminal = options.resetTerminal;
     this.resizeTerminal = options.resizeTerminal;
@@ -68,18 +80,25 @@ export class TerminalSyncController {
     this.onMismatchOrGap = options.onMismatchOrGap;
   }
 
+  private isInvalid(gen: number, session: string, syncId?: string): boolean {
+    if (this.generation !== gen || this.sessionId !== session) return true;
+    if (syncId !== undefined && this.syncId !== syncId) return true;
+    return false;
+  }
+
   public handleSyncStart(msg: SyncStartMessage): void {
     this.syncId = msg.syncId;
+    this.baseSeq = msg.baseSeq;
     this.expectedChunkIndex = 0;
+    this.syncEndReceived = false;
     this.syncComplete = false;
     this.isSyncing = true;
     this.role = msg.control;
     this.expectedSeq = msg.baseSeq + 1;
-    this.writeChain = Promise.resolve();
+    this.liveBacklogBytes = 0;
 
-    this.resetTerminal();
-    // Grid must be set to server snapshot geometry for BOTH controller and viewer
     this.lastGrid = { cols: msg.cols, rows: msg.rows };
+    this.resetTerminal();
     this.resizeTerminal(msg.cols, msg.rows);
   }
 
@@ -96,12 +115,8 @@ export class TerminalSyncController {
     const currentSession = this.sessionId;
     const currentSyncId = this.syncId;
 
-    this.writeChain = this.writeChain.then(async () => {
-      if (
-        this.generation !== currentGen ||
-        this.sessionId !== currentSession ||
-        this.syncId !== currentSyncId
-      ) {
+    void this.queue.enqueue(currentGen, async () => {
+      if (this.isInvalid(currentGen, currentSession, currentSyncId)) {
         return;
       }
       await this.writeTerminal(msg.data);
@@ -110,40 +125,44 @@ export class TerminalSyncController {
     return true;
   }
 
-  public async handleSyncEnd(msg: SyncEndMessage): Promise<boolean> {
-    if (msg.syncId !== this.syncId) return false;
+  public handleSyncEnd(msg: SyncEndMessage): Promise<boolean> {
+    if (msg.syncId !== this.syncId) return Promise.resolve(false);
 
     if (msg.chunkCount !== this.expectedChunkIndex) {
       this.onMismatchOrGap(
         `snapshot_chunk_count_mismatch: expected ${this.expectedChunkIndex} got ${msg.chunkCount}`
       );
-      return false;
+      return Promise.resolve(false);
     }
 
+    if (msg.baseSeq !== this.baseSeq) {
+      this.onMismatchOrGap(
+        `snapshot_base_seq_mismatch: expected ${this.baseSeq} got ${msg.baseSeq}`
+      );
+      return Promise.resolve(false);
+    }
+
+    this.syncEndReceived = true;
     const currentGen = this.generation;
     const currentSession = this.sessionId;
     const currentSyncId = this.syncId;
-    const targetBaseSeq = msg.baseSeq;
 
-    await this.writeChain;
-
-    if (
-      this.generation !== currentGen ||
-      this.sessionId !== currentSession ||
-      this.syncId !== currentSyncId
-    ) {
-      return false;
-    }
-
-    this.expectedSeq = targetBaseSeq + 1;
-    this.syncComplete = true;
-    this.isSyncing = false;
-    this.onSyncComplete(this.role);
-    return true;
+    return this.queue.enqueue(currentGen, async () => {
+      if (this.isInvalid(currentGen, currentSession, currentSyncId)) {
+        return;
+      }
+      this.syncComplete = true;
+      this.isSyncing = false;
+      this.liveBacklogBytes = 0;
+      this.onSyncComplete(this.role);
+    });
   }
 
   public handleOutput(msg: OutputMessage): boolean {
-    if (!this.syncComplete) return false;
+    if (!this.syncEndReceived) {
+      this.onMismatchOrGap("output_before_sync_end");
+      return false;
+    }
 
     if (msg.seq < this.expectedSeq) {
       // Duplicate, ignore
@@ -156,16 +175,23 @@ export class TerminalSyncController {
     }
 
     this.expectedSeq += 1;
+
+    if (!this.syncComplete) {
+      const bytes = new TextEncoder().encode(msg.data).length;
+      this.liveBacklogBytes += bytes;
+      if (this.liveBacklogBytes > this.maxLiveBacklogBytes) {
+        this.invalidate();
+        this.onMismatchOrGap(`live_backlog_overflow: exceeded ${this.maxLiveBacklogBytes} bytes`);
+        return false;
+      }
+    }
+
     const currentGen = this.generation;
     const currentSession = this.sessionId;
     const currentSyncId = this.syncId;
 
-    this.writeChain = this.writeChain.then(async () => {
-      if (
-        this.generation !== currentGen ||
-        this.sessionId !== currentSession ||
-        this.syncId !== currentSyncId
-      ) {
+    void this.queue.enqueue(currentGen, async () => {
+      if (this.isInvalid(currentGen, currentSession, currentSyncId)) {
         return;
       }
       await this.writeTerminal(msg.data);
@@ -175,7 +201,10 @@ export class TerminalSyncController {
   }
 
   public handleTerminalResize(msg: ResizeMessage): boolean {
-    if (!this.syncComplete) return false;
+    if (!this.syncEndReceived) {
+      this.onMismatchOrGap("resize_before_sync_end");
+      return false;
+    }
 
     if (msg.seq < this.expectedSeq) {
       return true;
@@ -187,10 +216,30 @@ export class TerminalSyncController {
     }
 
     this.expectedSeq += 1;
-    if (this.role === "viewer") {
-      this.lastGrid = { cols: msg.cols, rows: msg.rows };
-      this.resizeTerminal(msg.cols, msg.rows);
+
+    if (!this.syncComplete) {
+      this.liveBacklogBytes += 64;
+      if (this.liveBacklogBytes > this.maxLiveBacklogBytes) {
+        this.invalidate();
+        this.onMismatchOrGap(`live_backlog_overflow: exceeded ${this.maxLiveBacklogBytes} bytes`);
+        return false;
+      }
     }
+
+    const currentGen = this.generation;
+    const currentSession = this.sessionId;
+    const currentSyncId = this.syncId;
+    const isViewer = this.role === "viewer";
+
+    void this.queue.enqueue(currentGen, async () => {
+      if (this.isInvalid(currentGen, currentSession, currentSyncId)) {
+        return;
+      }
+      if (isViewer) {
+        this.lastGrid = { cols: msg.cols, rows: msg.rows };
+        this.resizeTerminal(msg.cols, msg.rows);
+      }
+    });
 
     return true;
   }
@@ -198,7 +247,9 @@ export class TerminalSyncController {
   public invalidate(): void {
     this.generation = -1;
     this.syncId = "";
+    this.syncEndReceived = false;
     this.syncComplete = false;
     this.isSyncing = false;
+    this.liveBacklogBytes = 0;
   }
 }

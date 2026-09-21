@@ -228,8 +228,9 @@ export function createWsTicket(
 }
 
 export function buildWsUrl(sessionId: string): string {
-  const url = new URL(API_BASE_URL);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  const base = typeof window !== "undefined" ? window.location.origin : "http://localhost";
+  const url = new URL(API_BASE_URL, base);
+  url.protocol = url.protocol === "https:" || url.protocol === "wss:" ? "wss:" : "ws:";
   url.pathname = `${url.pathname.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/ws`;
   url.search = "";
   return url.toString();

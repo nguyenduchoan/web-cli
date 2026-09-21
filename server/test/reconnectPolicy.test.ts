@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 import { ReconnectManager } from "../../web/src/lib/reconnectPolicy.js";
+import { TerminalConnectionSession } from "../../web/src/lib/terminalConnection.js";
+import { XtermOperationQueue } from "../../web/src/lib/xtermOperationQueue.js";
 
 test("R1: Reconnect follows 1s, 2s, 4s, 8s, 15s delays and stops after 5 consecutive attempts", () => {
   const manager = new ReconnectManager();
@@ -92,4 +95,516 @@ test("R5: TCP open does not reset retry counter; sync failure accumulates until 
   const finalDecision = manager.handleCloseCode(1006);
   assert.equal(finalDecision.action, "stop");
   assert.equal(manager.isStopped(), true);
+});
+
+class MockWebSocket {
+  public url: string;
+  public protocols: string[];
+  public readyState = 0; // 0 CONNECTING, 1 OPEN, 2 CLOSING, 3 CLOSED
+  public sent: string[] = [];
+  private listeners: Record<string, ((event: any) => void)[]> = {};
+
+  constructor(url: string, protocols: string[] = []) {
+    this.url = url;
+    this.protocols = protocols;
+  }
+
+  public addEventListener(type: string, listener: (event: any) => void): void {
+    if (!this.listeners[type]) this.listeners[type] = [];
+    this.listeners[type].push(listener);
+  }
+
+  public removeEventListener(type: string, listener: (event: any) => void): void {
+    if (!this.listeners[type]) return;
+    this.listeners[type] = this.listeners[type].filter((l) => l !== listener);
+  }
+
+  public emit(type: string, event: any = {}): void {
+    if (type === "open") this.readyState = 1;
+    if (type === "close") this.readyState = 3;
+    const list = this.listeners[type] || [];
+    for (const fn of list) {
+      fn(event);
+    }
+  }
+
+  public send(payload: string): void {
+    this.sent.push(payload);
+  }
+
+  public close(code = 1000): void {
+    this.readyState = 3;
+    this.emit("close", { code });
+  }
+}
+
+test("RP1: TerminalPane production imports and wires ReconnectManager and TerminalConnectionSession", async () => {
+  const terminalPaneContent = await fs.promises.readFile(
+    new URL("../../web/src/components/TerminalPane.tsx", import.meta.url),
+    "utf8"
+  );
+  assert.match(
+    terminalPaneContent,
+    /import\s+\{[^}]*ReconnectManager[^}]*\}\s+from\s+["']\.\.\/lib\/reconnectPolicy/
+  );
+  assert.match(
+    terminalPaneContent,
+    /import\s+\{[^}]*TerminalConnectionSession[^}]*\}\s+from\s+["']\.\.\/lib\/terminalConnection/
+  );
+  assert.match(terminalPaneContent, /new\s+ReconnectManager\(\)/);
+  assert.match(terminalPaneContent, /new\s+TerminalConnectionSession\(/);
+});
+
+test("RP2: mismatch consumes exactly one attempt", async () => {
+  let activeSocket: MockWebSocket | undefined;
+  const queue = new XtermOperationQueue();
+  let scheduledDelay = 0;
+  let scheduledCount = 0;
+
+  const session = new TerminalConnectionSession({
+    sessionId: "sess-1",
+    queue,
+    createTicket: async () => ({ ticket: "ticket-1" }),
+    createWebSocket: (url, protocols) => {
+      activeSocket = new MockWebSocket(url, protocols);
+      return activeSocket as unknown as WebSocket;
+    },
+    setTimeoutFn: (cb, delay) => {
+      if (delay !== 10_000) {
+        scheduledDelay = delay;
+        scheduledCount += 1;
+      }
+      return 123;
+    },
+    clearTimeoutFn: () => {},
+    randomJitterFn: () => 0,
+    callbacks: {
+      onConnectedChange: () => {},
+      onError: () => {},
+      writeTerminal: async () => {},
+      resetTerminal: () => {},
+      resizeTerminal: () => {}
+    }
+  });
+
+  await session.connect();
+  assert.ok(activeSocket);
+
+  // Open socket
+  activeSocket.emit("open");
+  // Sync
+  activeSocket.emit("message", {
+    data: JSON.stringify({
+      type: "sync_start",
+      syncId: "sync-1",
+      baseSeq: 0,
+      cols: 80,
+      rows: 24,
+      control: "controller"
+    })
+  });
+  activeSocket.emit("message", {
+    data: JSON.stringify({
+      type: "sync_end",
+      syncId: "sync-1",
+      baseSeq: 0,
+      chunkCount: 0
+    })
+  });
+  await queue.barrier();
+
+  // Socket is connected, manager attempt is 0
+  assert.equal(session.reconnectManager.getAttempt(), 0);
+  assert.equal(scheduledCount, 0);
+
+  // Send sequence gap (expected seq is 1, send 3)
+  activeSocket.emit("message", {
+    data: JSON.stringify({
+      type: "output",
+      seq: 3,
+      data: "gap-data"
+    })
+  });
+
+  // onMismatchOrGap closed socket, trigger close event
+  // Close handler runs
+  assert.equal(session.reconnectManager.getAttempt(), 1);
+  assert.equal(scheduledCount, 1);
+  assert.equal(scheduledDelay, 1000);
+});
+
+test("RP3: repeated TCP-open/sync-fail x5 stops retry and triggers onReconnectExhausted", async () => {
+  let activeSocket: MockWebSocket | undefined;
+  const queue = new XtermOperationQueue();
+  let exhaustedSessionId = "";
+  let retryTimerCallback: (() => void) | undefined;
+
+  const session = new TerminalConnectionSession({
+    sessionId: "sess-exhaust",
+    queue,
+    createTicket: async () => ({ ticket: "ticket-1" }),
+    createWebSocket: (url, protocols) => {
+      activeSocket = new MockWebSocket(url, protocols);
+      return activeSocket as unknown as WebSocket;
+    },
+    setTimeoutFn: (cb, delay) => {
+      if (delay !== 10_000) {
+        retryTimerCallback = cb;
+      }
+      return 1;
+    },
+    clearTimeoutFn: () => {},
+    randomJitterFn: () => 0,
+    callbacks: {
+      onConnectedChange: () => {},
+      onError: () => {},
+      onReconnectExhausted: (sid) => {
+        exhaustedSessionId = sid;
+      },
+      writeTerminal: async () => {},
+      resetTerminal: () => {},
+      resizeTerminal: () => {}
+    }
+  });
+
+  await session.connect();
+
+  for (let i = 1; i <= 6; i++) {
+    activeSocket!.emit("open");
+    // sync gap triggers close
+    activeSocket!.emit("message", {
+      data: JSON.stringify({
+        type: "sync_start",
+        syncId: `sync-${i}`,
+        baseSeq: 0,
+        cols: 80,
+        rows: 24,
+        control: "controller"
+      })
+    });
+    // gap
+    activeSocket!.emit("message", {
+      data: JSON.stringify({
+        type: "output",
+        seq: 5,
+        data: "gap"
+      })
+    });
+
+    if (i <= 5) {
+      assert.equal(session.reconnectManager.getAttempt(), i);
+      assert.equal(session.stopped, false);
+      assert.ok(retryTimerCallback);
+      const nextCb = retryTimerCallback;
+      retryTimerCallback = undefined;
+      await nextCb();
+    }
+  }
+
+  // After 5 retries have run and failed, manager stops
+  assert.equal(session.stopped, true);
+  assert.equal(session.reconnectManager.isStopped(), true);
+  assert.equal(exhaustedSessionId, "sess-exhaust");
+});
+
+test("RP4: close 4004 stops retry immediately with onSessionMissing", async () => {
+  let activeSocket: MockWebSocket | undefined;
+  const queue = new XtermOperationQueue();
+  let missingSessionId = "";
+  let timerScheduled = false;
+
+  const session = new TerminalConnectionSession({
+    sessionId: "sess-4004",
+    queue,
+    createTicket: async () => ({ ticket: "ticket-1" }),
+    createWebSocket: (url, protocols) => {
+      activeSocket = new MockWebSocket(url, protocols);
+      return activeSocket as unknown as WebSocket;
+    },
+    setTimeoutFn: (_cb, delay) => {
+      if (delay !== 10_000) {
+        timerScheduled = true;
+      }
+      return 1;
+    },
+    clearTimeoutFn: () => {},
+    callbacks: {
+      onConnectedChange: () => {},
+      onError: () => {},
+      onSessionMissing: (sid) => {
+        missingSessionId = sid;
+      },
+      writeTerminal: async () => {},
+      resetTerminal: () => {},
+      resizeTerminal: () => {}
+    }
+  });
+
+  await session.connect();
+  activeSocket!.emit("open");
+  activeSocket!.close(4004);
+
+  assert.equal(session.stopped, true);
+  assert.equal(session.reconnectManager.isStopped(), true);
+  assert.equal(missingSessionId, "sess-4004");
+  assert.equal(timerScheduled, false);
+});
+
+test("RP5: closed-socket snapshot callback cannot reconnect UI/reset retry", async () => {
+  let activeSocket: MockWebSocket | undefined;
+  const queue = new XtermOperationQueue();
+  let connectedState = false;
+  let resolveSnapshotWrite: () => void = () => {};
+  const snapshotPromise = new Promise<void>((r) => {
+    resolveSnapshotWrite = r;
+  });
+
+  let retryTimerCallback: (() => void) | undefined;
+
+  const session = new TerminalConnectionSession({
+    sessionId: "sess-rp5",
+    queue,
+    createTicket: async () => ({ ticket: "ticket-1" }),
+    createWebSocket: (url, protocols) => {
+      activeSocket = new MockWebSocket(url, protocols);
+      return activeSocket as unknown as WebSocket;
+    },
+    setTimeoutFn: (cb) => {
+      retryTimerCallback = cb;
+      return 1;
+    },
+    clearTimeoutFn: () => {},
+    randomJitterFn: () => 0,
+    callbacks: {
+      onConnectedChange: (conn) => {
+        connectedState = conn;
+      },
+      onError: () => {},
+      writeTerminal: async (data) => {
+        if (data === "snapshot-rp5") {
+          await snapshotPromise;
+        }
+      },
+      resetTerminal: () => {},
+      resizeTerminal: () => {}
+    }
+  });
+
+  await session.connect();
+  activeSocket!.emit("open");
+
+  // Send snapshot
+  activeSocket!.emit("message", {
+    data: JSON.stringify({
+      type: "sync_start",
+      syncId: "sync-rp5",
+      baseSeq: 0,
+      cols: 80,
+      rows: 24,
+      control: "controller"
+    })
+  });
+  activeSocket!.emit("message", {
+    data: JSON.stringify({
+      type: "snapshot_chunk",
+      syncId: "sync-rp5",
+      index: 0,
+      data: "snapshot-rp5"
+    })
+  });
+  activeSocket!.emit("message", {
+    data: JSON.stringify({
+      type: "sync_end",
+      syncId: "sync-rp5",
+      baseSeq: 0,
+      chunkCount: 1
+    })
+  });
+
+  // Socket closes with 1006 while snapshot write is still pending
+  activeSocket!.close(1006);
+
+  assert.equal(session.reconnectManager.getAttempt(), 1);
+  assert.equal(session.connected, false);
+  assert.equal(connectedState, false);
+
+  // Now snapshot finishes while waiting for retry timer
+  resolveSnapshotWrite();
+  await queue.barrier();
+
+  // Late completion MUST NOT report connected, MUST NOT reset attempt
+  assert.equal(session.connected, false);
+  assert.equal(connectedState, false);
+  assert.equal(session.reconnectManager.getAttempt(), 1);
+  assert.ok(retryTimerCallback);
+
+  // Now execute retry timer -> starts attempt 2
+  await retryTimerCallback!();
+  assert.ok(activeSocket);
+  activeSocket!.emit("open");
+
+  // Attempt 2 sync succeeds
+  activeSocket!.emit("message", {
+    data: JSON.stringify({
+      type: "sync_start",
+      syncId: "sync-rp5-2",
+      baseSeq: 0,
+      cols: 80,
+      rows: 24,
+      control: "controller"
+    })
+  });
+  activeSocket!.emit("message", {
+    data: JSON.stringify({
+      type: "sync_end",
+      syncId: "sync-rp5-2",
+      baseSeq: 0,
+      chunkCount: 0
+    })
+  });
+  await queue.barrier();
+
+  // Only the new healthy attempt resets the counter and marks connected
+  assert.equal(session.reconnectManager.getAttempt(), 0);
+  assert.equal(session.connected, true);
+  assert.equal(connectedState, true);
+});
+
+test("RP6: gap invalidates old attempt, late callbacks cannot affect new socket", async () => {
+  let socket1: MockWebSocket | undefined;
+  let socket2: MockWebSocket | undefined;
+  let socketCount = 0;
+  const queue = new XtermOperationQueue();
+  const writtenData: string[] = [];
+
+  let resolveWrite1: () => void = () => {};
+  const write1Promise = new Promise<void>((r) => {
+    resolveWrite1 = r;
+  });
+
+  let retryTimerCallback: (() => void) | undefined;
+
+  const session = new TerminalConnectionSession({
+    sessionId: "sess-rp6",
+    queue,
+    createTicket: async () => ({ ticket: "ticket-1" }),
+    createWebSocket: (url, protocols) => {
+      socketCount += 1;
+      const sock = new MockWebSocket(url, protocols);
+      if (socketCount === 1) socket1 = sock;
+      else socket2 = sock;
+      return sock as unknown as WebSocket;
+    },
+    setTimeoutFn: (cb) => {
+      retryTimerCallback = cb;
+      return 1;
+    },
+    clearTimeoutFn: () => {},
+    randomJitterFn: () => 0,
+    callbacks: {
+      onConnectedChange: () => {},
+      onError: () => {},
+      writeTerminal: async (data) => {
+        if (data === "chunk-old") {
+          await write1Promise;
+          writtenData.push("old-write-done");
+        } else {
+          writtenData.push(data);
+        }
+      },
+      resetTerminal: () => {
+        writtenData.push("reset");
+      },
+      resizeTerminal: () => {}
+    }
+  });
+
+  await session.connect();
+  assert.ok(socket1);
+  socket1!.emit("open");
+
+  // Attempt 1: snapshot pending
+  socket1!.emit("message", {
+    data: JSON.stringify({
+      type: "sync_start",
+      syncId: "sync-1",
+      baseSeq: 0,
+      cols: 80,
+      rows: 24,
+      control: "controller"
+    })
+  });
+  socket1!.emit("message", {
+    data: JSON.stringify({
+      type: "snapshot_chunk",
+      syncId: "sync-1",
+      index: 0,
+      data: "chunk-old"
+    })
+  });
+  socket1!.emit("message", {
+    data: JSON.stringify({
+      type: "sync_end",
+      syncId: "sync-1",
+      baseSeq: 0,
+      chunkCount: 1
+    })
+  });
+
+  // Gap occurs on socket 1
+  socket1!.emit("message", {
+    data: JSON.stringify({
+      type: "output",
+      seq: 5,
+      data: "gap"
+    })
+  });
+
+  // Socket 1 closed, exactly 1 retry scheduled
+  assert.equal(session.reconnectManager.getAttempt(), 1);
+  assert.ok(retryTimerCallback);
+
+  // New attempt started via retry timer
+  await retryTimerCallback!();
+  assert.ok(socket2);
+  socket2!.emit("open");
+
+  // Late events from old socket1 MUST NOT affect socket2!
+  socket1!.emit("message", {
+    data: JSON.stringify({
+      type: "exit",
+      exitCode: 123
+    })
+  });
+  socket1!.emit("close", { code: 1006 });
+  assert.equal(socket2!.readyState, 1); // Still open!
+  assert.equal(session.reconnectManager.getAttempt(), 1); // Not incremented!
+
+  // Now resolve old write
+  resolveWrite1();
+  await queue.barrier();
+
+  // Attempt 2 sync completes normally
+  socket2!.emit("message", {
+    data: JSON.stringify({
+      type: "sync_start",
+      syncId: "sync-2",
+      baseSeq: 0,
+      cols: 80,
+      rows: 24,
+      control: "controller"
+    })
+  });
+  socket2!.emit("message", {
+    data: JSON.stringify({
+      type: "sync_end",
+      syncId: "sync-2",
+      baseSeq: 0,
+      chunkCount: 0
+    })
+  });
+  await queue.barrier();
+
+  assert.equal(session.reconnectManager.getAttempt(), 0);
+  assert.equal(session.connected, true);
 });
