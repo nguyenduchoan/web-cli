@@ -25,7 +25,9 @@ async function main() {
   for (const [url, expected] of [['/login', 200], ['/', 303], ['/vietqr/', 303], ['/api/web-cli/', 303], ['/api/web-cli/api/sessions', 401], ['/hub-api/web-cli-setup', 401]]) {
     const response = await send(url); assert.equal(response.status, expected, url); statuses[url] = response.status;
   }
-  const secrets = fs.readFileSync('/home/mrhoan/.local/state/server-hub/hub-auth/initial-login.txt', 'utf8');
+  const defaultSecretsPath = path.join(os.homedir(), '.local/state/server-hub/hub-auth/initial-login.txt');
+  const secretsPath = process.env.HUB_SECRETS_PATH || defaultSecretsPath;
+  const secrets = fs.readFileSync(secretsPath, 'utf8');
   const username = secrets.match(/^Username: (.+)$/m)[1];
   const password = secrets.match(/^Password: (.+)$/m)[1];
   const login = await send('/hub-api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) });
@@ -57,8 +59,9 @@ async function main() {
   }
   if (process.argv.includes('--browser')) {
     assert.ok(!local, 'browser verification uses public HTTPS');
-    const puppeteer = require(process.env.PUPPETEER_MODULE || '/home/mrhoan/source/clone-truyen/node_modules/puppeteer');
-    const browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--disable-gpu'] });
+    const { resolvePuppeteer, resolveChromePath } = require('./smoke-utils.cjs');
+    const puppeteer = resolvePuppeteer();
+    const browser = await puppeteer.launch({ executablePath: resolveChromePath() || process.env.CHROME_PATH || '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--disable-gpu'] });
     const page = await browser.newPage();
     const errors = []; page.on('pageerror', (error) => errors.push(error.message));
     try {

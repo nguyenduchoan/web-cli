@@ -7,7 +7,8 @@ const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { once } = require("node:events");
 const { TOTP, Secret } = require("otpauth");
-const puppeteer = require(process.env.PUPPETEER_MODULE || "/home/mrhoan/source/clone-truyen/node_modules/puppeteer");
+const { resolvePuppeteer, resolveChromePath } = require("./smoke-utils.cjs");
+const puppeteer = resolvePuppeteer();
 
 const root = path.resolve(__dirname, "..");
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -122,7 +123,7 @@ async function main() {
 
     // 2. Launch Puppeteer browser test
     browser = await puppeteer.launch({
-      executablePath: process.env.CHROME_PATH || "/usr/bin/google-chrome",
+      executablePath: resolveChromePath() || process.env.CHROME_PATH || "/usr/bin/google-chrome",
       headless: true,
       args: ["--no-sandbox", "--disable-gpu"]
     });

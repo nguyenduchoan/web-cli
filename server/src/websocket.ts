@@ -36,6 +36,7 @@ type AttachedClient = {
   syncComplete: boolean;
   syncId?: string;
   liveQueue: Array<Record<string, unknown>>;
+  liveQueueBytes: number;
   cleaned: boolean;
 };
 
@@ -231,6 +232,25 @@ export class WebSocketBridge {
     return true;
   }
 
+  private queueOrSend(client: AttachedClient, payload: Record<string, unknown>): boolean {
+    if (client.cleaned || client.ws.readyState !== WebSocket.OPEN) return false;
+    if (client.syncComplete) {
+      return this.sendJson(client.ws, payload);
+    }
+
+    const bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+    if (client.liveQueueBytes + bytes > this.config.maxWebsocketBufferedBytes) {
+      try {
+        client.ws.close(1013, "Live queue overflow during sync");
+      } catch {}
+      return false;
+    }
+
+    client.liveQueue.push(payload);
+    client.liveQueueBytes += bytes;
+    return true;
+  }
+
   private attach(ws: WebSocket, session: PublicSession, authKey: string, protocolVersion: 1 | 2): void {
     this.socketAuth.set(ws, authKey);
     const sessionId = session.id;
@@ -254,6 +274,7 @@ export class WebSocketBridge {
       attachedAt: Date.now(),
       syncComplete: protocolVersion === 1,
       liveQueue: [],
+      liveQueueBytes: 0,
       cleaned: false
     };
     clients.push(clientRecord);
@@ -288,6 +309,8 @@ export class WebSocketBridge {
     const cleanup = () => {
       if (clientRecord.cleaned) return;
       clientRecord.cleaned = true;
+      clientRecord.liveQueue = [];
+      clientRecord.liveQueueBytes = 0;
       clearInterval(heartbeat);
       clearInterval(authTimer);
 
@@ -339,21 +362,13 @@ export class WebSocketBridge {
     const offOutputV2 = this.sessions.onOutputV2((changedSessionId, seq, data) => {
       if (changedSessionId !== sessionId || protocolVersion !== 2) return;
       const msg = { type: "output", sessionId, serverEpoch, seq, data };
-      if (!clientRecord.syncComplete) {
-        clientRecord.liveQueue.push(msg);
-      } else {
-        this.sendJson(ws, msg);
-      }
+      this.queueOrSend(clientRecord, msg);
     });
 
     const offResize = this.sessions.onTerminalResize((changedSessionId, seq, cols, rows) => {
       if (changedSessionId !== sessionId || protocolVersion !== 2) return;
       const msg = { type: "terminal_resize", sessionId, serverEpoch, seq, cols, rows };
-      if (!clientRecord.syncComplete) {
-        clientRecord.liveQueue.push(msg);
-      } else {
-        this.sendJson(ws, msg);
-      }
+      this.queueOrSend(clientRecord, msg);
     });
 
     const offState = this.sessions.onState((changedSessionId, nextSession) => {
@@ -368,11 +383,7 @@ export class WebSocketBridge {
           registryRevision: this.sessions.getRegistryRevision(),
           session: nextSession
         };
-        if (!clientRecord.syncComplete) {
-          clientRecord.liveQueue.push(msg);
-        } else {
-          this.sendJson(ws, msg);
-        }
+        this.queueOrSend(clientRecord, msg);
       }
     });
 
@@ -389,11 +400,7 @@ export class WebSocketBridge {
           registryRevision: this.sessions.getRegistryRevision(),
           session: currentSession
         };
-        if (!clientRecord.syncComplete) {
-          clientRecord.liveQueue.push(msg);
-        } else {
-          this.sendJson(ws, msg);
-        }
+        this.queueOrSend(clientRecord, msg);
       }
     });
 
@@ -419,11 +426,7 @@ export class WebSocketBridge {
         eventId: attention.eventId,
         createdAt: attention.createdAt
       };
-      if (!clientRecord.syncComplete) {
-        clientRecord.liveQueue.push(msg);
-      } else {
-        this.sendJson(ws, msg);
-      }
+      this.queueOrSend(clientRecord, msg);
     });
 
     // Start protocol handshake
@@ -510,14 +513,16 @@ export class WebSocketBridge {
           // 4. Drain queued live operations with seq > baseSeq
           const queued = clientRecord.liveQueue;
           clientRecord.liveQueue = [];
+          clientRecord.liveQueueBytes = 0;
           for (const msg of queued) {
+            if (clientRecord.cleaned || ws.readyState !== WebSocket.OPEN) break;
             if (msg.type === "output" || msg.type === "terminal_resize") {
               const seq = msg.seq as number;
               if (seq > snapshot.baseSeq) {
-                this.sendJson(ws, msg);
+                if (!this.sendJson(ws, msg)) break;
               }
             } else {
-              this.sendJson(ws, msg);
+              if (!this.sendJson(ws, msg)) break;
             }
           }
         })

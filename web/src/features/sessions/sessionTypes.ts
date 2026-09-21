@@ -112,6 +112,9 @@ export type SessionsAction =
       type: "REMOVE_ATTENTION";
       payload: {
         sessionId: string;
-        eventId?: string;
+        eventId: string;
       };
+    }
+  | {
+      type: "RESET_SESSIONS";
     };

@@ -57,6 +57,27 @@ export function validateFid(fid: string): boolean {
 let firebaseApp: FirebaseApp | undefined;
 let firebaseMessaging: Messaging | undefined;
 let registrationGeneration = 0;
+let unsubscribeOnMessage: (() => void) | undefined;
+let unsubscribeOnRegistered: (() => void) | undefined;
+
+export function cleanupPushListeners(): void {
+  if (unsubscribeOnMessage) {
+    try {
+      unsubscribeOnMessage();
+    } catch {
+      // ignore
+    }
+    unsubscribeOnMessage = undefined;
+  }
+  if (unsubscribeOnRegistered) {
+    try {
+      unsubscribeOnRegistered();
+    } catch {
+      // ignore
+    }
+    unsubscribeOnRegistered = undefined;
+  }
+}
 
 export async function isPushEnvironmentSupported(): Promise<boolean> {
   if (
@@ -121,9 +142,18 @@ export async function registerPushNotification(
       return { state: "register_error", error: "Không thể khởi tạo Firebase Messaging." };
     }
 
-    // Attach foreground listener
+    // Attach foreground listener with prior cleanup to avoid duplicate handlers
+    if (unsubscribeOnMessage) {
+      try {
+        unsubscribeOnMessage();
+      } catch {
+        // ignore
+      }
+      unsubscribeOnMessage = undefined;
+    }
+
     if (onForegroundAttention) {
-      onMessage(messaging, (payload) => {
+      unsubscribeOnMessage = onMessage(messaging, (payload) => {
         const data = payload.data as Record<string, string> | undefined;
         if (data && data.type === "attention" && data.sessionId) {
           onForegroundAttention({
@@ -136,11 +166,20 @@ export async function registerPushNotification(
 
     const deviceId = getDeviceId();
 
-    // Register callback for FID
+    // Register callback for FID with cleanup of prior listeners
+    if (unsubscribeOnRegistered) {
+      try {
+        unsubscribeOnRegistered();
+      } catch {
+        // ignore
+      }
+      unsubscribeOnRegistered = undefined;
+    }
+
     const fidPromise = new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("Quá thời gian lấy mã đăng ký Firebase.")), 20_000);
 
-      onRegistered(messaging, (fid) => {
+      unsubscribeOnRegistered = onRegistered(messaging, (fid) => {
         clearTimeout(timeout);
         if (currentGen !== registrationGeneration) {
           reject(new Error("Đăng ký bị hủy bỏ."));
@@ -180,6 +219,7 @@ export async function unregisterPushNotification(
   config: NotificationConfig
 ): Promise<{ state: PushState; error?: string }> {
   registrationGeneration++; // Invalidate pending callbacks
+  cleanupPushListeners();
 
   const deviceId = getDeviceId();
 

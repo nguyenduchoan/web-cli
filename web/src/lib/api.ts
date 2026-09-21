@@ -1,7 +1,8 @@
 import type { AgentConfig, BrowseResult, ProjectConfig, Session } from "./types";
 
 export const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ?? `${window.location.origin}/api/web-cli`;
+  (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_BASE_URL) ||
+  (typeof window !== "undefined" ? `${window.location.origin}/api/web-cli` : "/api/web-cli");
 
 export class ApiError extends Error {
   status: number;
@@ -19,12 +20,30 @@ export class ApiError extends Error {
   }
 }
 
-type ApiErrorBody = {
+export type ApiErrorBody = {
   error?: string;
   message?: string;
   code?: string;
   loginUrl?: string;
 };
+
+export function extractApiErrorInfo(
+  status: number,
+  body: unknown
+): { message: string; code?: string; loginUrl?: string } {
+  let message = `Request failed with status ${status}`;
+  let code: string | undefined;
+  let loginUrl: string | undefined;
+
+  if (body && typeof body === "object") {
+    const b = body as ApiErrorBody;
+    code = b.code ?? b.error;
+    loginUrl = b.loginUrl;
+    message = b.message || b.error || message;
+  }
+
+  return { message, code, loginUrl };
+}
 
 async function request<T>(path: string, _token: string, init: RequestInit = {}): Promise<T> {
   const controller = new AbortController();
@@ -82,14 +101,16 @@ async function request<T>(path: string, _token: string, init: RequestInit = {}):
 
     try {
       const body = (await response.json()) as ApiErrorBody;
-      code = body.code;
-      loginUrl = body.loginUrl;
+      const extracted = extractApiErrorInfo(response.status, body);
+      code = extracted.code;
+      loginUrl = extracted.loginUrl;
+      message = extracted.message;
+
       if (body.loginUrl === "/login") {
         const hash = window.location.hash;
         const target = hash && hash.startsWith("#session=") ? `/login${hash}` : "/login";
         window.location.replace(target);
       }
-      message = body.message || body.error || message;
     } catch {
       // Keep generic message.
     }

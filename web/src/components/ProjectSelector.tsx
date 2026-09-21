@@ -7,7 +7,7 @@ type Props = {
   projects: ProjectConfig[];
   selectedProjectId?: string;
   selectedSubpath?: string;
-  onSelect: (projectId: string, subpath?: string) => void;
+  onSelect: (projectId: string, subpath?: string, workingDirectoryId?: string) => void;
 };
 
 function buildBreadcrumbs(subpath: string): { label: string; subpath: string }[] {
@@ -23,6 +23,7 @@ export function ProjectSelector({ token, projects, selectedProjectId, selectedSu
   const [browsingProjectId, setBrowsingProjectId] = useState<string | null>(null);
   const [currentSubpath, setCurrentSubpath] = useState("");
   const [canonicalSubpath, setCanonicalSubpath] = useState("");
+  const [currentWorkingDirectoryId, setCurrentWorkingDirectoryId] = useState("");
   const [directories, setDirectories] = useState<BrowseDirectory[]>([]);
   const [loading, setLoading] = useState(false);
   const [browseError, setBrowseError] = useState<string>();
@@ -57,6 +58,7 @@ export function ProjectSelector({ token, projects, selectedProjectId, selectedSu
         setBrowsingProjectId(projectId);
         setCurrentSubpath(subpath);
         setCanonicalSubpath(result.canonicalSubpath ?? subpath);
+        setCurrentWorkingDirectoryId(result.workingDirectoryId ?? "");
         setDirectories(result.directories);
       } catch (err) {
         if (sequenceRef.current !== currentSeq) return;
@@ -83,6 +85,7 @@ export function ProjectSelector({ token, projects, selectedProjectId, selectedSu
     setDirectories([]);
     setCurrentSubpath("");
     setCanonicalSubpath("");
+    setCurrentWorkingDirectoryId("");
     setBrowseError(undefined);
     setLoading(false);
   };
@@ -126,7 +129,7 @@ export function ProjectSelector({ token, projects, selectedProjectId, selectedSu
                 >
                   <button
                     type="button"
-                    onClick={() => onSelect(project.id, undefined)}
+                    onClick={() => onSelect(project.id, undefined, project.workingDirectoryId)}
                     className="flex min-h-12 flex-1 items-center gap-2 px-3 text-left active:bg-white/10"
                   >
                     <svg className="h-4 w-4 shrink-0 text-signal-400" viewBox="0 0 20 20" fill="currentColor">
@@ -210,7 +213,7 @@ export function ProjectSelector({ token, projects, selectedProjectId, selectedSu
         type="button"
         disabled={loading || Boolean(browseError)}
         onClick={() => {
-          onSelect(browsingProjectId, canonicalSubpath || currentSubpath || undefined);
+          onSelect(browsingProjectId, canonicalSubpath || currentSubpath || undefined, currentWorkingDirectoryId);
           resetBrowse();
         }}
         className="flex min-h-10 w-full items-center justify-center gap-2 bg-signal-500 text-sm font-bold text-black active:bg-signal-400 disabled:opacity-50 disabled:cursor-not-allowed"

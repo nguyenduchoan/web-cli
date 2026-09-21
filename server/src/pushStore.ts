@@ -184,10 +184,9 @@ export class PushStore {
     this.cache.devices = this.cache.devices.filter((dev) => {
       if (dev.deviceId !== deviceId) return true;
       if (authScope && dev.webAuthScope !== authScope) {
-        // Can only delete if scope matches or unauthenticated delete
-        return false;
+        return true; // KEEP mismatched device
       }
-      return false;
+      return false; // delete matching device
     });
 
     if (this.cache.devices.length !== initialLen) {

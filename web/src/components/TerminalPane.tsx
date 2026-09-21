@@ -1,8 +1,9 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
-import { buildWsUrl, createWsTicket } from "../lib/api";
+import { ApiError, buildWsUrl, createWsTicket } from "../lib/api";
 import { installTerminalTouchScroll } from "../lib/terminalTouchScroll";
+import { TerminalSyncController } from "../lib/terminalSync";
 import type { ServerMessageV2, Session } from "../lib/types";
 
 export type TerminalPaneHandle = {
@@ -19,6 +20,8 @@ type Props = {
   onConnectedChange: (connected: boolean, control?: "controller" | "viewer") => void;
   onAttention?: (event: { sessionId: string; eventId: string; createdAt: string }) => void;
   onError: (message: string) => void;
+  onSessionMissing?: (sessionId: string) => void;
+  onReconnectExhausted?: (sessionId: string) => void;
   fontSize: number;
   reconnectKey: number;
 };
@@ -31,6 +34,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     onConnectedChange,
     onAttention,
     onError,
+    onSessionMissing,
+    onReconnectExhausted,
     fontSize,
     reconnectKey
   },
@@ -220,12 +225,66 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     const currentSessionId = session.id;
     const currentGen = connectionGeneration;
 
+    const MAX_RECONNECT_ATTEMPTS = 5;
+    const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 15000];
+
     const schedule = () => {
       if (stopped) return;
       clearTimeout(timer);
-      const delay = Math.min(15_000, 1000 * 2 ** Math.min(attempt++, 4)) + Math.random() * 400;
+
+      if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+        stopped = true;
+        connecting = false;
+        setConnected(false);
+        setSyncing(false);
+        syncCompleteRef.current = false;
+        onConnectedChange(false, roleRef.current);
+        onReconnectExhausted?.(currentSessionId);
+        return;
+      }
+
+      const baseDelay = RECONNECT_DELAYS[attempt] ?? 15_000;
+      attempt += 1;
+      const delay = baseDelay + Math.random() * 400;
       timer = setTimeout(() => void connect(), delay);
     };
+
+    const syncCtrl = new TerminalSyncController({
+      sessionId: currentSessionId,
+      generation: currentGen,
+      writeTerminal: (data) =>
+        new Promise<void>((resolve) => {
+          if (stopped || sessionIdRef.current !== currentSessionId) {
+            resolve();
+            return;
+          }
+          terminal!.write(data, () => resolve());
+        }),
+      resetTerminal: () => {
+        terminal!.reset();
+      },
+      resizeTerminal: (cols, rows) => {
+        terminal!.resize(cols, rows);
+      },
+      onSyncComplete: (syncedRole) => {
+        if (stopped || sessionIdRef.current !== currentSessionId) return;
+        attempt = 0;
+        syncCompleteRef.current = true;
+        roleRef.current = syncedRole;
+        setRole(syncedRole);
+        setSyncing(false);
+        setConnected(true);
+        onConnectedChange(true, syncedRole);
+        if (syncedRole === "controller") {
+          resizeRef.current(true);
+        }
+      },
+      onMismatchOrGap: () => {
+        if (stopped || sessionIdRef.current !== currentSessionId) return;
+        wsRef.current?.close();
+        schedule();
+      }
+    });
 
     async function connect() {
       if (stopped || connecting || wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -249,7 +308,6 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
             return;
           }
           connecting = false;
-          attempt = 0;
           lastMessage = Date.now();
           stopScrollRef.current();
 
@@ -271,70 +329,40 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
               case "sync_start": {
                 syncCompleteRef.current = false;
                 setSyncing(true);
-                syncIdRef.current = message.syncId;
-                expectedSeqRef.current = message.baseSeq + 1;
+                setConnected(false);
                 roleRef.current = message.control;
                 setRole(message.control);
-                terminal!.reset();
-
-                if (message.control === "viewer") {
-                  terminal!.resize(message.cols, message.rows);
-                }
                 onConnectedChange(false, message.control);
+                syncCtrl.handleSyncStart(message);
                 break;
               }
 
               case "snapshot_chunk": {
-                if (message.syncId !== syncIdRef.current) break;
-                terminal!.write(message.data);
+                syncCtrl.handleSnapshotChunk(message);
                 break;
               }
 
               case "sync_end": {
-                if (message.syncId !== syncIdRef.current) break;
-                syncCompleteRef.current = true;
-                setSyncing(false);
-                setConnected(true);
-                expectedSeqRef.current = message.baseSeq + 1;
-                onConnectedChange(true, roleRef.current);
-
-                if (roleRef.current === "controller") {
-                  resizeRef.current(true);
-                }
+                void syncCtrl.handleSyncEnd(message);
                 break;
               }
 
               case "output": {
-                if (message.seq !== expectedSeqRef.current) {
-                  // Sequence gap detected, reconnect to sync state
-                  ws.close();
-                  schedule();
-                  return;
-                }
-                expectedSeqRef.current += 1;
-                terminal!.write(message.data);
+                syncCtrl.handleOutput(message);
                 break;
               }
 
               case "terminal_resize": {
-                if (message.seq !== expectedSeqRef.current) {
-                  // Sequence gap detected, reconnect to sync state
-                  ws.close();
-                  schedule();
-                  return;
-                }
-                expectedSeqRef.current += 1;
-                if (roleRef.current === "viewer") {
-                  terminal!.resize(message.cols, message.rows);
-                }
+                syncCtrl.handleTerminalResize(message);
                 break;
               }
 
               case "control": {
+                syncCtrl.role = message.role;
                 roleRef.current = message.role;
                 setRole(message.role);
-                onConnectedChange(syncCompleteRef.current, message.role);
-                if (message.role === "controller" && syncCompleteRef.current) {
+                onConnectedChange(syncCtrl.syncComplete, message.role);
+                if (message.role === "controller" && syncCtrl.syncComplete) {
                   resizeRef.current(true);
                 }
                 break;
@@ -412,18 +440,46 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
             window.dispatchEvent(new Event("web-cli-auth-expired"));
             return;
           }
+          if (event.code === 4004) {
+            stopped = true;
+            onSessionMissing?.(currentSessionId);
+            return;
+          }
+          if (event.code === 4003) {
+            stopped = true;
+            onError("Không có quyền truy cập phiên (403)");
+            return;
+          }
           schedule();
         });
 
         ws.addEventListener("error", () => ws.close());
       } catch (error) {
         if (!stopped && sessionIdRef.current === currentSessionId) {
-          onError(error instanceof Error ? error.message : "Mất kết nối.");
           connecting = false;
           setConnected(false);
           setSyncing(false);
           syncCompleteRef.current = false;
           onConnectedChange(false, roleRef.current);
+
+          if (error instanceof ApiError) {
+            if (error.status === 404 || error.code === "unknown_session") {
+              stopped = true;
+              onSessionMissing?.(currentSessionId);
+              return;
+            }
+            if (error.status === 401) {
+              stopped = true;
+              return;
+            }
+            if (error.status === 403) {
+              stopped = true;
+              onError(error.message || "Không có quyền truy cập phiên (403)");
+              return;
+            }
+          }
+
+          onError(error instanceof Error ? error.message : "Mất kết nối.");
           schedule();
         }
       }
@@ -447,6 +503,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
 
     return () => {
       stopped = true;
+      syncCtrl.invalidate();
       clearTimeout(timer);
       clearInterval(heartbeat);
       window.removeEventListener("online", resume);

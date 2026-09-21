@@ -43,6 +43,19 @@ export function computeSessionOrder(sessionsById: Record<string, Session>): stri
     .map((s) => s.id);
 }
 
+export function pruneKeyedState<T>(
+  source: Record<string, T>,
+  validIds: Set<string>
+): Record<string, T> {
+  const result: Record<string, T> = {};
+  for (const [id, val] of Object.entries(source)) {
+    if (validIds.has(id)) {
+      result[id] = val;
+    }
+  }
+  return result;
+}
+
 export function sessionsReducer(state: SessionsState, action: SessionsAction): SessionsState {
   switch (action.type) {
     case "LOAD_SESSIONS": {
@@ -74,6 +87,13 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
       const nextActiveId = isNewEpoch ? undefined : state.activeSessionId;
       const isMissingActive = Boolean(nextActiveId && !nextSessionsById[nextActiveId]);
 
+      const validIds = new Set(Object.keys(nextSessionsById));
+      const nextDrafts = isNewEpoch ? {} : pruneKeyedState(state.draftsBySessionId, validIds);
+      const nextAttention = isNewEpoch ? {} : pruneKeyedState(state.attentionBySessionId, validIds);
+      const nextSeenAttention = isNewEpoch
+        ? {}
+        : pruneKeyedState(state.seenAttentionBySessionId, validIds);
+
       return {
         ...state,
         sessionsById: nextSessionsById,
@@ -87,9 +107,9 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
           : isNewEpoch
           ? { status: "idle", control: "none" }
           : state.connection,
-        draftsBySessionId: isNewEpoch ? {} : state.draftsBySessionId,
-        attentionBySessionId: isNewEpoch ? {} : state.attentionBySessionId,
-        seenAttentionBySessionId: isNewEpoch ? {} : state.seenAttentionBySessionId
+        draftsBySessionId: nextDrafts,
+        attentionBySessionId: nextAttention,
+        seenAttentionBySessionId: nextSeenAttention
       };
     }
 
@@ -261,6 +281,16 @@ export function sessionsReducer(state: SessionsState, action: SessionsAction): S
         seenAttentionBySessionId: eventId
           ? { ...state.seenAttentionBySessionId, [sessionId]: eventId }
           : state.seenAttentionBySessionId
+      };
+    }
+
+    case "RESET_SESSIONS": {
+      return {
+        ...initialSessionsState,
+        capacity: {
+          ...initialSessionsState.capacity,
+          max: state.capacity.max
+        }
       };
     }
 

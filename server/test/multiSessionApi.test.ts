@@ -122,6 +122,47 @@ test("GET /api/browse/:projectId returns workingDirectoryId and canonicalSubpath
   }
 });
 
+test("symlink directory resolves to identical workingDirectoryId and canonicalSubpath as real directory (Phase 6)", async () => {
+  const { fastify, tmpDir, cleanup } = setupTestApp();
+  try {
+    const realDir = path.join(tmpDir, "real-dir");
+    fs.mkdirSync(realDir);
+    const linkDir = path.join(tmpDir, "link-dir");
+    fs.symlinkSync(realDir, linkDir, "dir");
+
+    const resReal = await fastify.inject({
+      method: "GET",
+      url: "/api/browse/proj-1?subpath=real-dir"
+    });
+    assert.equal(resReal.statusCode, 200);
+    const bodyReal = resReal.json();
+
+    const resLink = await fastify.inject({
+      method: "GET",
+      url: "/api/browse/proj-1?subpath=link-dir"
+    });
+    assert.equal(resLink.statusCode, 200);
+    const bodyLink = resLink.json();
+
+    // Both must yield identical workingDirectoryId and canonicalSubpath pointing to real-dir
+    assert.equal(bodyReal.canonicalSubpath, "real-dir");
+    assert.equal(bodyLink.canonicalSubpath, "real-dir");
+    assert.equal(bodyReal.workingDirectoryId, bodyLink.workingDirectoryId);
+
+    // Creating a session at real-dir should have matching workingDirectoryId
+    const resSession = await fastify.inject({
+      method: "POST",
+      url: "/api/sessions",
+      payload: { agentId: "codex", projectId: "proj-1", subpath: "real-dir" }
+    });
+    assert.equal(resSession.statusCode, 201);
+    const sessionBody = resSession.json();
+    assert.equal(sessionBody.session.workingDirectoryId, bodyLink.workingDirectoryId);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("POST /api/sessions creates session with metadata, epoch, revision, capacity, and Idempotency-Key", async () => {
   const { fastify, cleanup } = setupTestApp();
   const key = "11111111-2222-4333-8444-555555555555";

@@ -31,7 +31,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function setupWsServer() {
+async function setupWsServer(configOverrides: Partial<AppConfig> = {}) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ws-test-"));
   const port = await freePort();
 
@@ -64,7 +64,8 @@ async function setupWsServer() {
     maxRetainedSessions: 50,
     shutdownTimeoutMs: 2_000,
     maxWebsocketConnections: 8,
-    maxWebsocketBufferedBytes: 100_000
+    maxWebsocketBufferedBytes: 100_000,
+    ...configOverrides
   };
 
   const fastify = Fastify();
@@ -253,6 +254,161 @@ test("W10: Auth/Origin/ticket validation rejects invalid handshakes", async () =
       () => connectWs(port, session.id, "invalid-ticket-key"),
       (err: any) => err.message.includes("401") || err.message.includes("Unexpected server response")
     );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("W11: Sync liveQueue bounded; overflow closes socket with 1013 and leaves session running", async () => {
+  // Low limit: 300 bytes
+  const { port, session, getTicket, sessions, cleanup } = await setupWsServer({
+    maxWebsocketBufferedBytes: 300
+  });
+
+  try {
+    const termState = sessions.getTerminalState(session.id);
+    assert.ok(termState);
+
+    // Delay snapshot barrier to keep client in syncComplete === false
+    const origBarrier = termState.createSnapshotBarrier.bind(termState);
+    termState.createSnapshotBarrier = async () => {
+      await delay(150);
+      return origBarrier();
+    };
+
+    const ticket = getTicket(2);
+    const { ws, messages } = await connectWs(port, session.id, ticket.ticket);
+
+    const closePromise = new Promise<{ code: number; reason: string }>((resolve) => {
+      ws.on("close", (code, reason) => resolve({ code, reason: reason.toString() }));
+    });
+
+    // While client is waiting for snapshot barrier, emit output exceeding 300 bytes
+    (sessions as any).events.emit("output_v2", session.id, 1, "A".repeat(400));
+
+    const closeEvent = await closePromise;
+    assert.equal(closeEvent.code, 1013);
+    assert.match(closeEvent.reason, /Live queue overflow/);
+
+    // PTY/session remains running
+    const currentSession = sessions.getSession(session.id);
+    assert.ok(currentSession);
+    assert.equal(currentSession.state, "running");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("W12: Unicode byte accounting computes UTF-8 byte length rather than string length", async () => {
+  // Limit is 200 bytes. A 4-byte emoji (e.g. 🚀) has string length 2, but UTF-8 byte length 4.
+  // 60 emojis = 120 string chars, but 240 UTF-8 bytes.
+  const { port, session, getTicket, sessions, cleanup } = await setupWsServer({
+    maxWebsocketBufferedBytes: 200
+  });
+
+  try {
+    const termState = sessions.getTerminalState(session.id);
+    assert.ok(termState);
+
+    const origBarrier = termState.createSnapshotBarrier.bind(termState);
+    termState.createSnapshotBarrier = async () => {
+      await delay(150);
+      return origBarrier();
+    };
+
+    const ticket = getTicket(2);
+    const { ws } = await connectWs(port, session.id, ticket.ticket);
+
+    const closePromise = new Promise<{ code: number; reason: string }>((resolve) => {
+      ws.on("close", (code, reason) => resolve({ code, reason: reason.toString() }));
+    });
+
+    // 60 rockets (120 chars, but 240 bytes payload)
+    const emojiPayload = "🚀".repeat(60);
+    (sessions as any).events.emit("output_v2", session.id, 1, emojiPayload);
+
+    const closeEvent = await closePromise;
+    assert.equal(closeEvent.code, 1013);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("W13: Slow syncing client does not pause/kill PTY or disconnect other clients", async () => {
+  const { port, session, getTicket, sessions, cleanup } = await setupWsServer({
+    maxWebsocketBufferedBytes: 300
+  });
+
+  try {
+    // Client 1 (healthy viewer / fast client connected first)
+    const t1 = getTicket(2);
+    const { ws: ws1, messages: m1 } = await connectWs(port, session.id, t1.ticket);
+    await waitForMessage(m1, (m) => m.type === "sync_end");
+
+    // Client 2 (slow syncing client)
+    const termState = sessions.getTerminalState(session.id);
+    const origBarrier = termState!.createSnapshotBarrier.bind(termState!);
+    termState!.createSnapshotBarrier = async () => {
+      await delay(150);
+      return origBarrier();
+    };
+
+    const t2 = getTicket(2);
+    const { ws: ws2 } = await connectWs(port, session.id, t2.ticket);
+
+    const close2Promise = new Promise<number>((resolve) => {
+      ws2.on("close", (code) => resolve(code));
+    });
+
+    // Overflow client 2's queue
+    (sessions as any).events.emit("output_v2", session.id, 2, "X".repeat(500));
+
+    // Client 2 drops with 1013
+    const code2 = await close2Promise;
+    assert.equal(code2, 1013);
+
+    // Client 1 remains connected and receives output!
+    const received1 = await waitForMessage(m1, (m) => m.type === "output" && m.data.includes("XXXXX"));
+    assert.ok(received1);
+    assert.equal(ws1.readyState, WebSocket.OPEN);
+
+    // Session remains running
+    assert.equal(sessions.getSession(session.id)?.state, "running");
+
+    ws1.close();
+  } finally {
+    await cleanup();
+  }
+});
+
+test("WQ3: Normal small backlog is drained in order after sync completes", async () => {
+  const { port, session, getTicket, sessions, cleanup } = await setupWsServer({
+    maxWebsocketBufferedBytes: 100_000
+  });
+
+  try {
+    const termState = sessions.getTerminalState(session.id);
+    const origBarrier = termState!.createSnapshotBarrier.bind(termState!);
+    termState!.createSnapshotBarrier = async () => {
+      await delay(80);
+      return origBarrier();
+    };
+
+    const ticket = getTicket(2);
+    const { ws, messages } = await connectWs(port, session.id, ticket.ticket);
+
+    // Emit live message while in sync
+    (sessions as any).events.emit("output_v2", session.id, 100, "hello queued");
+
+    // Wait for sync_end
+    await waitForMessage(messages, (m) => m.type === "sync_end");
+
+    // After sync_end, queued message should arrive
+    const queuedMsg = await waitForMessage(messages, (m) => m.type === "output" && m.data === "hello queued");
+    assert.ok(queuedMsg);
+    assert.equal(queuedMsg.seq, 100);
+
+    ws.close();
   } finally {
     await cleanup();
   }

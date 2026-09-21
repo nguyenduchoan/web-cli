@@ -7,7 +7,8 @@ const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const { TOTP, Secret } = require('otpauth');
 const WebSocket = require('ws');
-const puppeteer = require(process.env.PUPPETEER_MODULE || '/home/mrhoan/source/clone-truyen/node_modules/puppeteer');
+const { resolvePuppeteer, resolveChromePath } = require('./smoke-utils.cjs');
+const puppeteer = resolvePuppeteer();
 const root = path.resolve(__dirname, '..');
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -42,7 +43,7 @@ async function main() {
       probe.on('error', (error) => { if (!error.message.includes('before the connection was established')) reject(error); });
     });
     const password = fs.readFileSync(path.join(dir, 'hub/initial-login.txt'), 'utf8').match(/^Password: (.+)$/m)[1];
-    browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--disable-gpu'] });
+    browser = await puppeteer.launch({ executablePath: resolveChromePath() || process.env.CHROME_PATH || '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--disable-gpu'] });
     const page = await browser.newPage(); const errors = []; page.on('pageerror', (error) => errors.push(error.message));
     await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 1 });
     await page.goto(base, { waitUntil: 'networkidle0' });

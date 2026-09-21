@@ -232,3 +232,30 @@ test("PushRoutes: device registration and test notification flow with FCM enable
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("PushStore: deleteDevice with mismatched authScope keeps device, matching authScope deletes it (Phase 8)", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "push-store-scope-test-"));
+  try {
+    const store = new PushStore(tempDir, "test-project-123");
+    const deviceId = crypto.randomUUID();
+    const fid = "c" + "2".repeat(21);
+
+    await store.upsertDevice({
+      deviceId,
+      fid,
+      webAuthScope: "scope-A"
+    });
+
+    assert.ok(store.getDevice(deviceId));
+
+    // Delete with different scope B -> device must NOT be deleted
+    await store.deleteDevice(deviceId, "scope-B");
+    assert.ok(store.getDevice(deviceId), "Device should remain when deleted with mismatched authScope");
+
+    // Delete with matching scope A -> device must be deleted
+    await store.deleteDevice(deviceId, "scope-A");
+    assert.equal(store.getDevice(deviceId), undefined, "Device should be deleted when authScope matches");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});

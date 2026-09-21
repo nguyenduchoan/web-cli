@@ -3,7 +3,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { build } = require('esbuild');
-const puppeteer = require('../../clone-truyen/node_modules/puppeteer');
+const { resolvePuppeteer, resolveChromePath } = require('./smoke-utils.cjs');
+const puppeteer = resolvePuppeteer();
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {
@@ -21,7 +22,7 @@ async function main() {
       window.replies = [];
       term.onData(data => replies.push(data));
     `, resolveDir: path.resolve(__dirname, '..'), loader: 'ts' }, bundle: true, outfile: bundle, platform: 'browser' });
-    browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--disable-gpu'] });
+    browser = await puppeteer.launch({ executablePath: resolveChromePath() || process.env.CHROME_PATH || '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--disable-gpu'] });
     const page = await browser.newPage();
     const errors = []; page.on('pageerror', error => errors.push(error.message));
     await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });

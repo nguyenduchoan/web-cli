@@ -49,7 +49,7 @@ export function SessionManager({
   const mobileDialogRef = useRef<HTMLDialogElement>(null);
   const [isNewDialogOpen, setIsNewDialogOpen] = useState(false);
   const [newDialogPrefill, setNewDialogPrefill] = useState<
-    { agentId?: string; projectId?: string; subpath?: string } | undefined
+    { agentId?: string; projectId?: string; subpath?: string; workingDirectoryId?: string } | undefined
   >();
 
   // Handle native dialog open / close for mobile sheet
@@ -72,16 +72,26 @@ export function SessionManager({
     agentId?: string;
     projectId?: string;
     subpath?: string;
+    workingDirectoryId?: string;
   }) => {
     setNewDialogPrefill(prefill);
-    setIsNewDialogOpen(true);
+    if (isMobileSheetOpen) {
+      onCloseMobileSheet();
+      // Ensure mobile sheet dialog has closed before opening new dialog
+      setTimeout(() => {
+        setIsNewDialogOpen(true);
+      }, 50);
+    } else {
+      setIsNewDialogOpen(true);
+    }
   };
 
   const handleNewSessionAtFolder = (session: Session) => {
     handleOpenNewSession({
       agentId: session.agentId,
       projectId: session.projectId,
-      subpath: session.subpath
+      subpath: session.subpath,
+      workingDirectoryId: session.workingDirectoryId
     });
   };
 

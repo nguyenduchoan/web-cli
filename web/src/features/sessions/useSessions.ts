@@ -30,8 +30,7 @@ export function useSessions({ token, isAuthenticated }: UseSessionsOptions) {
       authGenRef.current += 1;
       connectionGenRef.current += 1;
       inputBlockedRef.current = true;
-      dispatch({ type: "SET_ACTIVE_SESSION", payload: { sessionId: undefined } });
-      dispatch({ type: "SET_CONNECTION", payload: { status: "idle", control: "none" } });
+      dispatch({ type: "RESET_SESSIONS" });
     }
   }, [isAuthenticated]);
 
@@ -161,54 +160,61 @@ export function useSessions({ token, isAuthenticated }: UseSessionsOptions) {
       }
     } catch (err) {
       if (authGenRef.current !== currentAuthGen) return;
-      retryCountRef.current = Math.min(retryCountRef.current + 1, 5);
-      // Exponential backoff: 1, 2, 4, 8, 15s + jitter
-      const baseMs = [1000, 2000, 4000, 8000, 15000][retryCountRef.current - 1] ?? 15000;
-      const jitterMs = Math.random() * 0.2 * baseMs;
-      const delayMs = baseMs + jitterMs;
-
-      clearTimeout(pollTimerRef.current);
-      pollTimerRef.current = setTimeout(() => {
-        void fetchSessions();
-      }, delayMs);
       throw err;
     } finally {
       isFetchingListRef.current = false;
     }
   }, [isAuthenticated, token, switchSession]);
 
-  // Polling loop
+  // Polling loop: single owner of scheduling and backoff
   useEffect(() => {
     if (!isAuthenticated) return;
 
     let active = true;
 
-    const scheduleNextPoll = () => {
+    const scheduleNextPoll = (isError = false) => {
       clearTimeout(pollTimerRef.current);
       if (!active) return;
 
       const isVisible = document.visibilityState === "visible";
       const isOnline = navigator.onLine;
 
-      if (isVisible && isOnline && isAuthenticated) {
-        pollTimerRef.current = setTimeout(async () => {
-          if (!active) return;
-          try {
-            await fetchSessions();
-          } catch {
-            // Error handling done in fetchSessions with backoff
-          }
-          if (active) scheduleNextPoll();
-        }, 5000);
+      if (!isVisible || !isOnline || !isAuthenticated) return;
+
+      let delayMs = 5000;
+      if (isError) {
+        retryCountRef.current = Math.min(retryCountRef.current + 1, 5);
+        const baseMs = [1000, 2000, 4000, 8000, 15000][retryCountRef.current - 1] ?? 15000;
+        const jitterMs = Math.random() * 0.2 * baseMs;
+        delayMs = baseMs + jitterMs;
+      } else {
+        retryCountRef.current = 0;
       }
+
+      pollTimerRef.current = setTimeout(async () => {
+        if (!active) return;
+        let failed = false;
+        try {
+          await fetchSessions();
+        } catch {
+          failed = true;
+        }
+        if (active) scheduleNextPoll(failed);
+      }, delayMs);
     };
 
     const handleVisibilityOrOnline = () => {
       if (document.visibilityState === "visible" && navigator.onLine && isAuthenticated) {
-        retryCountRef.current = 0; // Fresh retry cycle
-        void fetchSessions().finally(() => {
-          scheduleNextPoll();
-        });
+        retryCountRef.current = 0;
+        clearTimeout(pollTimerRef.current);
+        void fetchSessions().then(
+          () => {
+            if (active) scheduleNextPoll(false);
+          },
+          () => {
+            if (active) scheduleNextPoll(true);
+          }
+        );
       }
     };
 
@@ -216,9 +222,14 @@ export function useSessions({ token, isAuthenticated }: UseSessionsOptions) {
     window.addEventListener("online", handleVisibilityOrOnline);
     window.addEventListener("focus", handleVisibilityOrOnline);
 
-    void fetchSessions().finally(() => {
-      scheduleNextPoll();
-    });
+    void fetchSessions().then(
+      () => {
+        if (active) scheduleNextPoll(false);
+      },
+      () => {
+        if (active) scheduleNextPoll(true);
+      }
+    );
 
     return () => {
       active = false;

@@ -6,6 +6,7 @@ import { SessionManager } from "./components/SessionManager";
 import type { TerminalPaneHandle } from "./components/TerminalPane";
 import { useSessions } from "./features/sessions/useSessions";
 import { authStatus, listAgents, listProjects, listSessions, logout, type AuthStatus } from "./lib/api";
+import { clearPushConsent, cleanupPushListeners } from "./lib/push";
 import type { AgentConfig, ProjectConfig, Session } from "./lib/types";
 
 const TerminalPane = lazy(() =>
@@ -136,6 +137,29 @@ export default function App() {
     [setConnection]
   );
 
+  const handleSessionMissing = useCallback(
+    (missingSessionId: string) => {
+      setConnection({
+        sessionId: missingSessionId,
+        status: "missing",
+        control: "none"
+      });
+      void fetchSessions();
+    },
+    [setConnection, fetchSessions]
+  );
+
+  const handleReconnectExhausted = useCallback(
+    (sessId: string) => {
+      setConnection({
+        sessionId: sessId,
+        status: "disconnected",
+        control: "none"
+      });
+    },
+    [setConnection]
+  );
+
   const load = useCallback(async () => {
     const status = await authStatus();
     setAuth(status);
@@ -190,6 +214,9 @@ export default function App() {
       }));
       setIsSettingsOpen(false);
       setIsMobileSheetOpen(false);
+      clearPushConsent();
+      cleanupPushListeners();
+      dispatchSessions({ type: "RESET_SESSIONS" });
       setError("Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại để tiếp tục.");
     };
 
@@ -390,6 +417,8 @@ export default function App() {
         return "Đang kết nối…";
       case "missing":
         return "Phiên không còn trên máy chủ";
+      case "disconnected":
+        return "Mất kết nối";
       default:
         return "Đang nối lại…";
     }
@@ -566,6 +595,15 @@ export default function App() {
             >
               ↓ cuối
             </button>
+            {sessionsState.connection.status === "disconnected" && (
+              <button
+                className="control min-h-[44px] text-emerald-400 font-semibold"
+                aria-label="Nối lại phiên"
+                onClick={() => setReconnectKey((k) => k + 1)}
+              >
+                Nối lại
+              </button>
+            )}
           </div>
 
           <Suspense fallback={<div className="terminal-pane p-4">Đang tải terminal…</div>}>
@@ -577,6 +615,8 @@ export default function App() {
               onConnectedChange={handleConnectedChange}
               onAttention={addAttention}
               onError={showError}
+              onSessionMissing={handleSessionMissing}
+              onReconnectExhausted={handleReconnectExhausted}
               fontSize={fontSize}
               reconnectKey={reconnectKey}
             />
@@ -653,7 +693,10 @@ export default function App() {
             onClick={() =>
               void run(async () => {
                 await logout();
+                clearPushConsent();
+                cleanupPushListeners();
                 setIsSettingsOpen(false);
+                dispatchSessions({ type: "RESET_SESSIONS" });
                 setAuth({
                   authenticated: false,
                   setupRequired: false,

@@ -10,7 +10,8 @@ const { TOTP, Secret } = require("otpauth");
 const WebSocket = require("ws");
 
 const ROOT = path.resolve(__dirname, "..");
-const puppeteer = require(process.env.PUPPETEER_MODULE || "/home/mrhoan/source/clone-truyen/node_modules/puppeteer");
+const { resolvePuppeteer, resolveChromePath } = require("./smoke-utils.cjs");
+const puppeteer = resolvePuppeteer();
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -140,7 +141,7 @@ async function main() {
     assert.equal((await fetch(base + "/api/web-cli/api/sessions")).status, 401);
 
     browser = await puppeteer.launch({
-      executablePath: process.env.CHROME_PATH || "/usr/bin/google-chrome",
+      executablePath: resolveChromePath() || process.env.CHROME_PATH || "/usr/bin/google-chrome",
       headless: true,
       args: ["--no-sandbox", "--disable-gpu"]
     });

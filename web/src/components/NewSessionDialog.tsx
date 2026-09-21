@@ -9,7 +9,7 @@ type Props = {
   projects: ProjectConfig[];
   existingSessions: Session[];
   capacity: { active: number; reserved: number; max: number };
-  prefill?: { agentId?: string; projectId?: string; subpath?: string };
+  prefill?: { agentId?: string; projectId?: string; subpath?: string; workingDirectoryId?: string };
   isBusy: boolean;
   onClose: () => void;
   onSubmit: (input: {
@@ -32,22 +32,32 @@ export function NewSessionDialog({
   onSubmit
 }: Props) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const lastAgentIdRef = useRef<string>("");
   const [selectedAgentId, setSelectedAgentId] = useState<string>(
     prefill?.agentId || (agents.length > 0 ? agents[0].id : "shell")
   );
   const [selectedProjectId, setSelectedProjectId] = useState<string>("");
   const [selectedSubpath, setSelectedSubpath] = useState<string | undefined>();
+  const [selectedWorkingDirectoryId, setSelectedWorkingDirectoryId] = useState<string>("");
   const [sessionName, setSessionName] = useState<string>("");
   const [error, setError] = useState<string>("");
 
   useEffect(() => {
     if (isOpen) {
-      setSelectedAgentId(prefill?.agentId || (agents.length > 0 ? agents[0].id : "shell"));
-      if (prefill?.projectId) setSelectedProjectId(prefill.projectId);
-      else if (!selectedProjectId && projects.length > 0) {
-        setSelectedProjectId(projects[0].id);
+      if (prefill) {
+        setSelectedAgentId(prefill.agentId || lastAgentIdRef.current || (agents[0]?.id ?? "shell"));
+        setSelectedProjectId(prefill.projectId || (projects[0]?.id ?? ""));
+        setSelectedSubpath(prefill.subpath);
+        setSelectedWorkingDirectoryId(prefill.workingDirectoryId || "");
+      } else {
+        const agent = lastAgentIdRef.current || (agents[0]?.id ?? "shell");
+        setSelectedAgentId(agent);
+        const defaultProj = projects[0];
+        setSelectedProjectId(defaultProj?.id || "");
+        setSelectedSubpath(undefined);
+        setSelectedWorkingDirectoryId(defaultProj?.workingDirectoryId || "");
       }
-      if (prefill?.subpath !== undefined) setSelectedSubpath(prefill.subpath);
+      setSessionName("");
       setError("");
       dialogRef.current?.showModal();
     } else {
@@ -57,23 +67,17 @@ export function NewSessionDialog({
 
   const isCapacityFull = capacity.active + capacity.reserved >= capacity.max;
 
-  // Same-folder conflict warning check
-  // If selected agent !== "shell", and there is an existing non-shell session
-  // running/idle/stopping with the same project and subpath (or workingDirectoryId)
+  // Same-folder conflict warning check via canonical workingDirectoryId
   const conflictingSessions = useMemo(() => {
     if (selectedAgentId === "shell") return [];
-    if (!selectedProjectId) return [];
-
-    const normSubpath = (selectedSubpath || "").replace(/^\/+|\/+$/g, "");
+    if (!selectedWorkingDirectoryId) return [];
 
     return existingSessions.filter((s) => {
       if (s.agentId === "shell") return false;
       if (s.state !== "running" && s.state !== "idle" && s.state !== "stopping") return false;
-      if (s.projectId !== selectedProjectId) return false;
-      const existingSubpath = (s.subpath || "").replace(/^\/+|\/+$/g, "");
-      return existingSubpath === normSubpath;
+      return s.workingDirectoryId === selectedWorkingDirectoryId;
     });
-  }, [selectedAgentId, selectedProjectId, selectedSubpath, existingSessions]);
+  }, [selectedAgentId, selectedWorkingDirectoryId, existingSessions]);
 
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -143,7 +147,10 @@ export function NewSessionDialog({
           <AgentTabs
             agents={agents}
             selectedAgentId={selectedAgentId}
-            onSelect={(id) => setSelectedAgentId(id)}
+            onSelect={(id) => {
+              lastAgentIdRef.current = id;
+              setSelectedAgentId(id);
+            }}
           />
         </div>
 
@@ -155,9 +162,15 @@ export function NewSessionDialog({
             projects={projects}
             selectedProjectId={selectedProjectId}
             selectedSubpath={selectedSubpath}
-            onSelect={(projId, sub) => {
+            onSelect={(projId, sub, workingDirectoryId) => {
               setSelectedProjectId(projId);
               setSelectedSubpath(sub);
+              if (workingDirectoryId) {
+                setSelectedWorkingDirectoryId(workingDirectoryId);
+              } else {
+                const proj = projects.find((p) => p.id === projId);
+                setSelectedWorkingDirectoryId(proj?.workingDirectoryId || "");
+              }
             }}
           />
         </div>

@@ -108,6 +108,13 @@ export function registerSessionRoutes(fastify: FastifyInstance, options: Session
     }
 
     const targetPath = sanitized ? nodePath.resolve(project.path, sanitized) : project.path;
+    let realProjectRoot: string;
+    try {
+      realProjectRoot = await fs.realpath(project.path);
+    } catch {
+      realProjectRoot = project.path;
+    }
+
     let realTarget: string;
     try {
       realTarget = await fs.realpath(targetPath);
@@ -115,7 +122,7 @@ export function registerSessionRoutes(fastify: FastifyInstance, options: Session
       return sendError(reply, 404, "Path not found", "path_not_found");
     }
 
-    if (!isSubpathOf(realTarget, project.path)) {
+    if (!isSubpathOf(realTarget, realProjectRoot)) {
       return sendError(reply, 403, "Path outside project root", "path_traversal");
     }
 
@@ -124,13 +131,19 @@ export function registerSessionRoutes(fastify: FastifyInstance, options: Session
       return sendError(reply, 400, "Not a directory", "not_directory");
     }
 
+    const relative = nodePath.relative(realProjectRoot, realTarget);
+    const canonicalSubpath =
+      relative === ""
+        ? ""
+        : relative.split(nodePath.sep).join("/");
+
     const entries = await fs.readdir(realTarget, { withFileTypes: true });
     const directories = entries
       .filter((e) => e.isDirectory() && !e.name.startsWith(".") && e.name !== "node_modules")
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((e) => ({
         name: e.name,
-        subpath: sanitized ? `${sanitized}/${e.name}` : e.name
+        subpath: canonicalSubpath ? `${canonicalSubpath}/${e.name}` : e.name
       }));
 
     const workingDirectoryId = crypto.createHash("sha256").update(realTarget).digest("hex").slice(0, 32);
@@ -139,7 +152,7 @@ export function registerSessionRoutes(fastify: FastifyInstance, options: Session
       projectId: project.id,
       rootLabel: project.label,
       currentSubpath: sanitized,
-      canonicalSubpath: sanitized,
+      canonicalSubpath,
       workingDirectoryId,
       directories
     };
