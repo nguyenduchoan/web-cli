@@ -98,8 +98,18 @@ export class TerminalSyncController {
     this.liveBacklogBytes = 0;
 
     this.lastGrid = { cols: msg.cols, rows: msg.rows };
-    this.resetTerminal();
-    this.resizeTerminal(msg.cols, msg.rows);
+    const currentGen = this.generation;
+    const currentSession = this.sessionId;
+    const currentSyncId = this.syncId;
+    const { cols, rows } = msg;
+
+    // Invalidation skips queued stale work, but cannot cancel an xterm write
+    // already in progress. The next snapshot reset must wait for that write.
+    void this.queue.enqueue(currentGen, () => {
+      if (this.isInvalid(currentGen, currentSession, currentSyncId)) return;
+      this.resetTerminal();
+      this.resizeTerminal(cols, rows);
+    });
   }
 
   public handleSnapshotChunk(msg: SnapshotChunkMessage): boolean {

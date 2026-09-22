@@ -344,3 +344,110 @@ test("P7: First GET error retries with backoff even without activeSession; resto
 
   scheduler.stop();
 });
+
+test("P8: runtime getters use the current auth and fetch behavior", async () => {
+  const clock = new FakeClock();
+  let authenticated = false;
+  let fetchVersion = "old";
+  const calls: string[] = [];
+
+  const scheduler = new SessionPollingScheduler({
+    fetchSessions: async () => {
+      calls.push(fetchVersion);
+    },
+    hasActiveSession: () => true,
+    isAuthenticated: () => authenticated,
+    isVisible: () => true,
+    isOnline: () => true,
+    setTimeoutFn: clock.setTimeout,
+    clearTimeoutFn: clock.clearTimeout,
+    randomJitterFn: () => 0
+  });
+
+  authenticated = true;
+  fetchVersion = "new";
+  scheduler.start();
+  await scheduler.executeFetch();
+
+  assert.deepEqual(calls, ["new"]);
+  assert.equal(clock.getNextDueDelay(), 5000);
+
+  scheduler.stop();
+});
+
+test("P9: re-login waits for a stale fetch to drain, then starts exactly one current fetch", async () => {
+  const clock = new FakeClock();
+  let releaseOldFetch!: () => void;
+  const oldFetchPending = new Promise<void>((resolve) => {
+    releaseOldFetch = resolve;
+  });
+  let fetchVersion = "old";
+  const calls: string[] = [];
+
+  const scheduler = new SessionPollingScheduler({
+    fetchSessions: async () => {
+      calls.push(fetchVersion);
+      if (fetchVersion === "old") {
+        await oldFetchPending;
+      }
+    },
+    hasActiveSession: () => true,
+    isAuthenticated: () => true,
+    isVisible: () => true,
+    isOnline: () => true,
+    setTimeoutFn: clock.setTimeout,
+    clearTimeoutFn: clock.clearTimeout,
+    randomJitterFn: () => 0
+  });
+
+  scheduler.start();
+  const oldFetch = scheduler.executeFetch();
+  assert.deepEqual(calls, ["old"]);
+  assert.equal(scheduler.isFetching, true);
+
+  scheduler.stop();
+  fetchVersion = "new";
+  scheduler.start();
+  await scheduler.executeFetch();
+  assert.deepEqual(calls, ["old"], "re-login must not overlap the stale request");
+
+  releaseOldFetch();
+  await oldFetch;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(calls, ["old", "new"], "re-login must start a current fetch after stale drain");
+  assert.equal(clock.getPendingCount(), 1, "current fetch schedules exactly one periodic timer");
+  assert.equal(clock.getNextDueDelay(), 5000);
+
+  scheduler.stop();
+});
+
+test("P10: logout while a fetch is pending never schedules a late timer", async () => {
+  const clock = new FakeClock();
+  let releaseFetch!: () => void;
+  const pendingFetch = new Promise<void>((resolve) => {
+    releaseFetch = resolve;
+  });
+
+  const scheduler = new SessionPollingScheduler({
+    fetchSessions: async () => {
+      await pendingFetch;
+    },
+    hasActiveSession: () => true,
+    isAuthenticated: () => true,
+    isVisible: () => true,
+    isOnline: () => true,
+    setTimeoutFn: clock.setTimeout,
+    clearTimeoutFn: clock.clearTimeout,
+    randomJitterFn: () => 0
+  });
+
+  scheduler.start();
+  const fetch = scheduler.executeFetch();
+  scheduler.stop();
+  releaseFetch();
+  await fetch;
+
+  assert.equal(scheduler.hasScheduledTimer(), false);
+  assert.equal(clock.getPendingCount(), 0);
+});

@@ -164,6 +164,17 @@ async function main() {
     );
     assert.ok(sessionAId, "Session A created with valid UUID");
 
+    // The first authenticated render began while logged out. Once an active session
+    // exists, the production hook must schedule its own 5s refresh rather than rely
+    // on the explicit load/create requests above.
+    await page1.waitForNetworkIdle({ idleTime: 250, timeout: 3000 });
+    const isSessionPoll = (response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "GET" && url.pathname.endsWith("/api/web-cli/api/sessions");
+    };
+    await page1.waitForResponse(isSessionPoll, { timeout: 7500 });
+    await page1.waitForResponse(isSessionPoll, { timeout: 7500 });
+
     // Test terminal input on session A
     await page1.type("#command-input", "echo HELLO_FROM_A");
     await page1.click(".composer button[type=submit]");

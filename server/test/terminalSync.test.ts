@@ -3,7 +3,42 @@ import test from "node:test";
 import { TerminalSyncController } from "../../web/src/lib/terminalSync.js";
 import { XtermOperationQueue } from "../../web/src/lib/xtermOperationQueue.js";
 
-test("T2.1: Controller snapshot geometry restores server cols/rows before viewport fit", () => {
+test("XQ4: reconnect reset and snapshot wait behind a started old operation", async () => {
+  const events: string[] = [];
+  const queue = new XtermOperationQueue();
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  void queue.enqueue(queue.getGeneration(), async () => {
+    started.resolve();
+    await release.promise;
+    events.push("old-end");
+  });
+  await started.promise;
+  // Stale work that has not started must be skipped without losing the barrier.
+  void queue.enqueue(queue.getGeneration(), () => { events.push("stale"); });
+  const controller = new TerminalSyncController({
+    sessionId: "same-session",
+    generation: queue.invalidate(),
+    queue,
+    writeTerminal: async () => { events.push("snapshot"); },
+    resetTerminal: () => { events.push("reset"); },
+    resizeTerminal: () => { events.push("resize"); },
+    onSyncComplete: () => { events.push("complete"); },
+    onMismatchOrGap: assert.fail
+  });
+  try {
+    controller.handleSyncStart({ syncId: "new-sync", baseSeq: 0, cols: 100, rows: 30, control: "viewer" });
+    controller.handleSnapshotChunk({ syncId: "new-sync", index: 0, data: "snapshot" });
+    void controller.handleSyncEnd({ syncId: "new-sync", baseSeq: 0, chunkCount: 1 });
+    assert.deepEqual(events, [], "new reset must wait for old operation");
+  } finally {
+    release.resolve();
+    await queue.barrier();
+  }
+  assert.deepEqual(events, ["old-end", "reset", "resize", "snapshot", "complete"]);
+});
+
+test("T2.1: Controller snapshot geometry restores server cols/rows before viewport fit", async () => {
   let terminalCols = 80;
   let terminalRows = 24;
   let resetCount = 0;
@@ -32,6 +67,7 @@ test("T2.1: Controller snapshot geometry restores server cols/rows before viewpo
     control: "controller"
   });
 
+  await controller.queue.barrier();
   assert.equal(resetCount, 1);
   assert.equal(terminalCols, 100);
   assert.equal(terminalRows, 30);
@@ -686,6 +722,7 @@ test("OR5: live output/resize queued while snapshot drains, expectedSeq preserve
     resolveSnapshotWrite = r;
   });
 
+  const snapshotStarted = Promise.withResolvers<void>();
   let syncCompleted = false;
 
   const controller = new TerminalSyncController({
@@ -695,6 +732,7 @@ test("OR5: live output/resize queued while snapshot drains, expectedSeq preserve
     writeTerminal: async (data) => {
       if (data === "snapshot-data") {
         ops.push("snapshot-start");
+        snapshotStarted.resolve();
         await snapshotPromise;
         ops.push("snapshot-end");
       } else {
@@ -703,9 +741,7 @@ test("OR5: live output/resize queued while snapshot drains, expectedSeq preserve
     },
     resetTerminal: () => {},
     resizeTerminal: (cols, rows) => {
-      if (controller.syncEndReceived) {
-        ops.push(`live-resize:${cols}x${rows}`);
-      }
+      ops.push(`resize:${cols}x${rows}`);
     },
     onSyncComplete: () => {
       syncCompleted = true;
@@ -716,6 +752,8 @@ test("OR5: live output/resize queued while snapshot drains, expectedSeq preserve
 
   controller.handleSyncStart({ syncId: "sync-1", baseSeq: 10, cols: 80, rows: 24, control: "viewer" });
   controller.handleSnapshotChunk({ syncId: "sync-1", index: 0, data: "snapshot-data" });
+
+  await snapshotStarted.promise;
 
   // sync_end received while snapshot is still writing
   const syncEndPromise = controller.handleSyncEnd({ syncId: "sync-1", baseSeq: 10, chunkCount: 1 });
@@ -731,7 +769,7 @@ test("OR5: live output/resize queued while snapshot drains, expectedSeq preserve
   assert.equal(syncCompleted, false);
   assert.equal(controller.syncComplete, false);
   assert.equal(ops.includes("live-write:out11"), false);
-  assert.equal(ops.includes("live-resize:95x28"), false);
+  assert.equal(ops.includes("resize:95x28"), false);
 
   // Resolve snapshot
   resolveSnapshotWrite();
@@ -748,11 +786,12 @@ test("OR5: live output/resize queued while snapshot drains, expectedSeq preserve
   await queue.barrier();
 
   assert.deepEqual(ops, [
+    "resize:80x24",
     "snapshot-start",
     "snapshot-end",
     "sync-complete",
     "live-write:out11",
-    "live-resize:95x28",
+    "resize:95x28",
     "live-write:out13"
   ]);
 });

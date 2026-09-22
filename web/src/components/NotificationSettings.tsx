@@ -1,118 +1,12 @@
-import { useState, useEffect } from "react";
-import {
-  fetchNotificationConfig,
-  type NotificationConfig
-} from "../lib/api";
-import {
-  isPushEnvironmentSupported,
-  hasPushConsent,
-  registerPushNotification,
-  unregisterPushNotification,
-  testPushNotification,
-  type PushState
-} from "../lib/push";
+import type { PushSettingsModel } from "../features/push/usePushLifecycle";
+import type { PushState } from "../lib/push";
 
 interface NotificationSettingsProps {
-  onForegroundAttention?: (data: { eventId: string; sessionId: string }) => void;
+  settings: PushSettingsModel;
 }
 
-export function NotificationSettings({ onForegroundAttention }: NotificationSettingsProps) {
-  const [config, setConfig] = useState<NotificationConfig | null>(null);
-  const [pushState, setPushState] = useState<PushState>("unregistered");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [testMessage, setTestMessage] = useState<string | null>(null);
-  const [isBusy, setIsBusy] = useState(false);
-
-  useEffect(() => {
-    let mounted = true;
-
-    async function init() {
-      const supported = await isPushEnvironmentSupported();
-      if (!supported) {
-        if (mounted) setPushState("unsupported");
-        return;
-      }
-
-      try {
-        const conf = await fetchNotificationConfig();
-        if (!mounted) return;
-        setConfig(conf);
-
-        if (!conf.enabled) {
-          setPushState("unconfigured");
-          return;
-        }
-
-        if (Notification.permission === "denied") {
-          setPushState("permission_denied");
-          return;
-        }
-
-        if (hasPushConsent() && Notification.permission === "granted") {
-          setPushState("registered");
-        } else {
-          setPushState("unregistered");
-        }
-      } catch {
-        if (mounted) {
-          setPushState("unconfigured");
-        }
-      }
-    }
-
-    init();
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
-  const handleEnable = async () => {
-    if (!config || !config.enabled) return;
-    setIsBusy(true);
-    setPushState("registering");
-    setErrorMessage(null);
-    setTestMessage(null);
-
-    const result = await registerPushNotification(config, onForegroundAttention);
-    setPushState(result.state);
-    if (result.error) {
-      setErrorMessage(result.error);
-    }
-    setIsBusy(false);
-  };
-
-  const handleDisable = async () => {
-    if (!config || !config.enabled) return;
-    setIsBusy(true);
-    setPushState("unregistering");
-    setErrorMessage(null);
-    setTestMessage(null);
-
-    const result = await unregisterPushNotification(config);
-    setPushState(result.state);
-    if (result.error) {
-      setErrorMessage(result.error);
-    }
-    setIsBusy(false);
-  };
-
-  const handleTest = async () => {
-    setIsBusy(true);
-    setTestMessage(null);
-    setErrorMessage(null);
-
-    try {
-      const result = await testPushNotification();
-      if (result.queued) {
-        setTestMessage("Đã xếp hàng gửi thử.");
-      }
-    } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : "Gửi thử thất bại.");
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
+export function NotificationSettings({ settings }: NotificationSettingsProps) {
+  const { pushState, errorMessage, testMessage, isBusy, enable, disable, test } = settings;
   const statusLabel: Record<PushState, { text: string; color: string }> = {
     unconfigured: { text: "Chưa cấu hình Firebase", color: "text-slate-400 bg-slate-800/60 border-slate-700" },
     unsupported: { text: "Trình duyệt chưa hỗ trợ", color: "text-amber-300 bg-amber-950/40 border-amber-800/60" },
@@ -173,7 +67,7 @@ export function NotificationSettings({ onForegroundAttention }: NotificationSett
         {pushState !== "registered" && pushState !== "unregistering" && (
           <button
             type="button"
-            onClick={handleEnable}
+            onClick={() => void enable()}
             disabled={isBusy || pushState === "unconfigured" || pushState === "unsupported" || pushState === "permission_denied"}
             className="px-3 py-1.5 min-h-[44px] text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 active:bg-sky-700 disabled:opacity-50 disabled:pointer-events-none rounded-lg transition-colors flex items-center gap-1.5"
           >
@@ -185,7 +79,7 @@ export function NotificationSettings({ onForegroundAttention }: NotificationSett
           <>
             <button
               type="button"
-              onClick={handleDisable}
+              onClick={() => void disable()}
               disabled={isBusy}
               className="px-3 py-1.5 min-h-[44px] text-xs font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 active:bg-slate-900 border border-slate-700 rounded-lg transition-colors"
             >
@@ -193,7 +87,7 @@ export function NotificationSettings({ onForegroundAttention }: NotificationSett
             </button>
             <button
               type="button"
-              onClick={handleTest}
+              onClick={() => void test()}
               disabled={isBusy}
               className="px-3 py-1.5 min-h-[44px] text-xs font-medium text-sky-400 hover:text-sky-300 bg-sky-950/50 hover:bg-sky-900/50 border border-sky-800/60 rounded-lg transition-colors"
             >

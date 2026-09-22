@@ -62,3 +62,9 @@ jobs:
 
       - name: Run Mobile Browser Smoke
         run: node scripts/smoke-mobile.cjs
+
+      - name: Run Push Lifecycle Browser Smoke (mock Firebase)
+        run: node scripts/smoke-push-lifecycle.cjs
+
+      - name: Run Polling Lifecycle Browser Smoke
+        run: node scripts/smoke-polling-lifecycle.cjs

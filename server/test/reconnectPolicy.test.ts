@@ -608,3 +608,74 @@ test("RP6: gap invalidates old attempt, late callbacks cannot affect new socket"
   assert.equal(session.reconnectManager.getAttempt(), 0);
   assert.equal(session.connected, true);
 });
+
+test("RP7: same-session reconnect waits for old xterm write before new reset", async () => {
+  const queue = new XtermOperationQueue();
+  const sockets: MockWebSocket[] = [];
+  const events: string[] = [];
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let retry: (() => void) | undefined;
+  const session = new TerminalConnectionSession({
+    sessionId: "sess-rp7",
+    queue,
+    createTicket: async () => ({ ticket: "ticket" }),
+    createWebSocket: (url, protocols) => {
+      const socket = new MockWebSocket(url, protocols);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+    setTimeoutFn: (cb, delay) => { if (delay !== 10_000) retry = cb; return 1; },
+    clearTimeoutFn: () => {},
+    randomJitterFn: () => 0,
+    callbacks: {
+      onConnectedChange: () => {},
+      onError: () => {},
+      resetTerminal: () => { events.push("reset"); },
+      resizeTerminal: () => { events.push("resize"); },
+      writeTerminal: async (data) => {
+        if (data === "old") {
+          events.push("old-start");
+          started.resolve();
+          await release.promise;
+          events.push("old-end");
+        } else events.push(data);
+      }
+    }
+  });
+  const emit = (socket: MockWebSocket, message: object) => socket.emit("message", { data: JSON.stringify(message) });
+  const syncStart = (syncId: string) => ({ type: "sync_start", syncId, baseSeq: 0, cols: 80, rows: 24, control: "controller" });
+  try {
+    await session.connect();
+    const first = sockets[0];
+    first.emit("open");
+    emit(first, syncStart("old-sync"));
+    emit(first, { type: "snapshot_chunk", syncId: "old-sync", index: 0, data: "old" });
+    await started.promise;
+    emit(first, { type: "sync_end", syncId: "old-sync", baseSeq: 0, chunkCount: 1 });
+    emit(first, { type: "output", seq: 5, data: "gap" });
+    assert.equal(session.reconnectManager.getAttempt(), 1);
+    assert.ok(retry);
+    await retry();
+    const second = sockets[1];
+    second.emit("open");
+    emit(second, syncStart("new-sync"));
+    assert.deepEqual(events, ["reset", "resize", "old-start"], "second reset cannot run while old write is pending");
+    emit(second, { type: "snapshot_chunk", syncId: "new-sync", index: 0, data: "new-write" });
+    emit(second, { type: "sync_end", syncId: "new-sync", baseSeq: 0, chunkCount: 1 });
+    assert.equal(session.connected, false);
+    assert.equal(session.reconnectManager.getAttempt(), 1);
+    first.emit("close", { code: 1006 });
+    emit(first, { type: "exit", exitCode: 123 });
+    assert.equal(second.readyState, 1);
+    release.resolve();
+    await queue.barrier();
+    assert.deepEqual(events, ["reset", "resize", "old-start", "old-end", "reset", "resize", "new-write"]);
+    assert.equal(session.connected, true);
+    assert.equal(session.reconnectManager.getAttempt(), 0);
+  } finally {
+    release.resolve();
+    session.dispose();
+    await queue.barrier();
+  }
+});

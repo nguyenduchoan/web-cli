@@ -60,6 +60,7 @@ export class SessionPollingScheduler {
   public isFetching = false;
   public timerId: any = undefined;
   public authGeneration = 0;
+  private resumeAfterFetch = false;
 
   constructor(options: PollingSchedulerOptions) {
     this.fetchSessions = options.fetchSessions;
@@ -76,6 +77,9 @@ export class SessionPollingScheduler {
   public start(): void {
     this.stopped = false;
     this.authGeneration++;
+    if (this.isFetching) {
+      this.resumeAfterFetch = true;
+    }
     this.retryCount = 0;
     this.lastAttemptFailed = false;
   }
@@ -83,6 +87,7 @@ export class SessionPollingScheduler {
   public stop(): void {
     this.stopped = true;
     this.authGeneration++;
+    this.resumeAfterFetch = false;
     this.clearTimer();
   }
 
@@ -139,8 +144,16 @@ export class SessionPollingScheduler {
       this.retryCount = Math.min(this.retryCount + 1, 5);
     } finally {
       this.isFetching = false;
-      if (!this.stopped && this.authGeneration === currentGen) {
+      if (this.stopped) return;
+
+      if (this.authGeneration === currentGen) {
         this.scheduleNext();
+        return;
+      }
+
+      if (this.resumeAfterFetch) {
+        this.resumeAfterFetch = false;
+        void this.executeFetch();
       }
     }
   }

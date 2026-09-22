@@ -3,6 +3,7 @@ import type { AgentConfig, ProjectConfig, Session } from "../lib/types";
 import { NewSessionDialog } from "./NewSessionDialog";
 import { SessionList } from "./SessionList";
 import { NotificationSettings } from "./NotificationSettings";
+import type { PushSettingsModel } from "../features/push/usePushLifecycle";
 
 type Props = {
   isMobileSheetOpen: boolean;
@@ -25,7 +26,7 @@ type Props = {
   }) => Promise<void>;
   onCloseMobileSheet: () => void;
   onToggleDesktopSidebar: () => void;
-  onForegroundAttention?: (data: { eventId: string; sessionId: string }) => void;
+  pushSettings: PushSettingsModel;
 };
 
 export function SessionManager({
@@ -44,7 +45,7 @@ export function SessionManager({
   onCreateSession,
   onCloseMobileSheet,
   onToggleDesktopSidebar,
-  onForegroundAttention
+  pushSettings
 }: Props) {
   const mobileDialogRef = useRef<HTMLDialogElement>(null);
   const [isNewDialogOpen, setIsNewDialogOpen] = useState(false);
@@ -163,7 +164,7 @@ export function SessionManager({
         />
 
         <div className="pt-2 border-t border-white/10">
-          <NotificationSettings onForegroundAttention={onForegroundAttention} />
+          <NotificationSettings settings={pushSettings} />
         </div>
       </div>
     </div>

@@ -19,20 +19,14 @@ export function useSessions({ token, isAuthenticated }: UseSessionsOptions) {
   const selectionGenRef = useRef<number>(0);
   const authGenRef = useRef<number>(0);
   const inputBlockedRef = useRef<boolean>(false);
-  const isFetchingListRef = useRef<boolean>(false);
+  const sessionsFetchRef = useRef<{ authGeneration: number; promise: Promise<void> } | null>(null);
   const stateRef = useRef<SessionsState>(state);
   stateRef.current = state;
 
   const schedulerRef = useRef<SessionPollingScheduler | null>(null);
-  if (!schedulerRef.current) {
-    schedulerRef.current = new SessionPollingScheduler({
-      fetchSessions: async () => {
-        await fetchSessions();
-      },
-      hasActiveSession: () => Boolean(stateRef.current.activeSessionId),
-      isAuthenticated: () => isAuthenticated
-    });
-  }
+  const isAuthenticatedRef = useRef(isAuthenticated);
+  const fetchSessionsRef = useRef<() => Promise<void>>(async () => {});
+  isAuthenticatedRef.current = isAuthenticated;
 
   // Track auth generation on auth change
   useEffect(() => {
@@ -95,61 +89,83 @@ export function useSessions({ token, isAuthenticated }: UseSessionsOptions) {
 
   // Fetch session list with stale-guard and backoff retry
   const fetchSessions = useCallback(async (): Promise<void> => {
-    if (!isAuthenticated || isFetchingListRef.current) return;
+    if (!isAuthenticated) return;
     const currentAuthGen = authGenRef.current;
-    isFetchingListRef.current = true;
+    const inFlight = sessionsFetchRef.current;
+    if (inFlight) {
+      if (inFlight.authGeneration === currentAuthGen) {
+        await inFlight.promise;
+        return;
+      }
+      // Wait for the previous auth generation's request, then re-enter through
+      // the latest callback so all waiting callers share one fresh GET.
+      await inFlight.promise.catch(() => {});
+      if (!isAuthenticatedRef.current || authGenRef.current !== currentAuthGen) return;
+      return fetchSessionsRef.current();
+    }
 
-    try {
-      const response = await api.listSessions(token);
-      if (authGenRef.current !== currentAuthGen) return;
+    let fetchPromise!: Promise<void>;
+    fetchPromise = (async () => {
+      try {
+        const response = await api.listSessions(token);
+        if (authGenRef.current !== currentAuthGen) return;
 
-      const serverEpoch = response.serverEpoch ?? stateRef.current.serverEpoch ?? "epoch-1";
-      const registryRevision = response.registryRevision ?? stateRef.current.registryRevision;
+        const serverEpoch = response.serverEpoch ?? stateRef.current.serverEpoch ?? "epoch-1";
+        const registryRevision = response.registryRevision ?? stateRef.current.registryRevision;
 
-      dispatch({
-        type: "LOAD_SESSIONS",
-        payload: {
-          sessions: response.sessions,
-          serverEpoch,
-          registryRevision,
-          capacity: response.capacity
-        }
-      });
-
-      // Handle initial restore / hash / sessionStorage
-      const currentState = stateRef.current;
-      if (!currentState.activeSessionId) {
-        // Priority: hash -> sessionStorage -> newest running session
-        let targetId: string | undefined;
-        let isHashTarget = false;
-
-        const hash = window.location.hash;
-        const match = hash.match(/^#session=([0-9a-fA-F-]+)$/);
-        if (match) {
-          targetId = match[1];
-          isHashTarget = true;
-        }
-
-        if (!targetId) {
-          try {
-            targetId = sessionStorage.getItem(ACTIVE_SESSION_STORAGE_KEY) || undefined;
-          } catch {
-            // Ignore
+        dispatch({
+          type: "LOAD_SESSIONS",
+          payload: {
+            sessions: response.sessions,
+            serverEpoch,
+            registryRevision,
+            capacity: response.capacity
           }
-        }
+        });
 
-        if (targetId) {
-          const exists = response.sessions.some((s) => s.id === targetId);
-          if (exists) {
-            switchSession(targetId);
-          } else if (isHashTarget) {
-            // Hash specifies a session that no longer exists on server
-            dispatch({
-              type: "SET_CONNECTION",
-              payload: { status: "missing", control: "none" }
-            });
+        // Handle initial restore / hash / sessionStorage
+        const currentState = stateRef.current;
+        if (!currentState.activeSessionId) {
+          // Priority: hash -> sessionStorage -> newest running session
+          let targetId: string | undefined;
+          let isHashTarget = false;
+
+          const hash = window.location.hash;
+          const match = hash.match(/^#session=([0-9a-fA-F-]+)$/);
+          if (match) {
+            targetId = match[1];
+            isHashTarget = true;
+          }
+
+          if (!targetId) {
+            try {
+              targetId = sessionStorage.getItem(ACTIVE_SESSION_STORAGE_KEY) || undefined;
+            } catch {
+              // Ignore
+            }
+          }
+
+          if (targetId) {
+            const exists = response.sessions.some((s) => s.id === targetId);
+            if (exists) {
+              switchSession(targetId);
+            } else if (isHashTarget) {
+              // Hash specifies a session that no longer exists on server
+              dispatch({
+                type: "SET_CONNECTION",
+                payload: { status: "missing", control: "none" }
+              });
+            } else {
+              // SessionStorage target was deleted; fallback to running session
+              const newestRunning = response.sessions
+                .filter((s) => s.state === "running")
+                .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+              if (newestRunning) {
+                switchSession(newestRunning.id);
+              }
+            }
           } else {
-            // SessionStorage target was deleted; fallback to running session
+            // No target, pick newest running session if any
             const newestRunning = response.sessions
               .filter((s) => s.state === "running")
               .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
@@ -157,23 +173,28 @@ export function useSessions({ token, isAuthenticated }: UseSessionsOptions) {
               switchSession(newestRunning.id);
             }
           }
-        } else {
-          // No target, pick newest running session if any
-          const newestRunning = response.sessions
-            .filter((s) => s.state === "running")
-            .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-          if (newestRunning) {
-            switchSession(newestRunning.id);
-          }
+        }
+      } catch (err) {
+        if (authGenRef.current !== currentAuthGen) return;
+        throw err;
+      } finally {
+        if (sessionsFetchRef.current?.promise === fetchPromise) {
+          sessionsFetchRef.current = null;
         }
       }
-    } catch (err) {
-      if (authGenRef.current !== currentAuthGen) return;
-      throw err;
-    } finally {
-      isFetchingListRef.current = false;
-    }
+    })();
+    sessionsFetchRef.current = { authGeneration: currentAuthGen, promise: fetchPromise };
+    await fetchPromise;
   }, [isAuthenticated, token, switchSession]);
+
+  fetchSessionsRef.current = fetchSessions;
+  if (!schedulerRef.current) {
+    schedulerRef.current = new SessionPollingScheduler({
+      fetchSessions: () => fetchSessionsRef.current(),
+      hasActiveSession: () => Boolean(stateRef.current.activeSessionId),
+      isAuthenticated: () => isAuthenticatedRef.current
+    });
+  }
 
   const hasActiveSession = Boolean(state.activeSessionId);
 

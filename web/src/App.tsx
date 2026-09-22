@@ -6,7 +6,8 @@ import { SessionManager } from "./components/SessionManager";
 import type { TerminalPaneHandle } from "./components/TerminalPane";
 import { useSessions } from "./features/sessions/useSessions";
 import { authStatus, listAgents, listProjects, listSessions, logout, type AuthStatus } from "./lib/api";
-import { clearPushConsent, cleanupPushListeners } from "./lib/push";
+import { clearPushConsent } from "./lib/push";
+import { usePushLifecycle } from "./features/push/usePushLifecycle";
 import type { AgentConfig, ProjectConfig, Session } from "./lib/types";
 
 const TerminalPane = lazy(() =>
@@ -34,6 +35,7 @@ export default function App() {
     eventId: string;
     sessionId: string;
   } | null>(null);
+  const pushLifecycle = usePushLifecycle(Boolean(auth?.authenticated), setForegroundAttention);
 
   const {
     state: sessionsState,
@@ -207,6 +209,8 @@ export default function App() {
     void load().catch((err) => showError(err.message));
 
     const expired = () => {
+      pushLifecycle.invalidate();
+      setForegroundAttention(null);
       setAuth((current) => ({
         authenticated: false,
         setupRequired: false,
@@ -215,14 +219,13 @@ export default function App() {
       setIsSettingsOpen(false);
       setIsMobileSheetOpen(false);
       clearPushConsent();
-      cleanupPushListeners();
       dispatchSessions({ type: "RESET_SESSIONS" });
       setError("Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại để tiếp tục.");
     };
 
     window.addEventListener("web-cli-auth-expired", expired);
     return () => window.removeEventListener("web-cli-auth-expired", expired);
-  }, [load, showError]);
+  }, [load, showError, pushLifecycle.invalidate]);
 
   useEffect(() => {
     const viewport = window.visualViewport;
@@ -554,7 +557,7 @@ export default function App() {
           onCreateSession={handleCreateSession}
           onCloseMobileSheet={handleCloseMobileSheet}
           onToggleDesktopSidebar={() => setIsDesktopSidebarCollapsed(!isDesktopSidebarCollapsed)}
-          onForegroundAttention={(evt) => setForegroundAttention(evt)}
+          pushSettings={pushLifecycle}
         />
 
         <div className="controller-main">
@@ -692,9 +695,15 @@ export default function App() {
             disabled={busy}
             onClick={() =>
               void run(async () => {
-                await logout();
+                pushLifecycle.invalidate();
+                setForegroundAttention(null);
+                try {
+                  await logout();
+                } catch (error) {
+                  void pushLifecycle.resume();
+                  throw error;
+                }
                 clearPushConsent();
-                cleanupPushListeners();
                 setIsSettingsOpen(false);
                 dispatchSessions({ type: "RESET_SESSIONS" });
                 setAuth({
