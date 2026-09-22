@@ -102,6 +102,8 @@ class MockWebSocket {
   public protocols: string[];
   public readyState = 0; // 0 CONNECTING, 1 OPEN, 2 CLOSING, 3 CLOSED
   public sent: string[] = [];
+  public autoFinishClose = true;
+  private pendingCloseCode = 1000;
   private listeners: Record<string, ((event: any) => void)[]> = {};
 
   constructor(url: string, protocols: string[] = []) {
@@ -133,10 +135,220 @@ class MockWebSocket {
   }
 
   public close(code = 1000): void {
-    this.readyState = 3;
+    if (this.readyState >= 2) return;
+    this.readyState = 2;
+    this.pendingCloseCode = code;
+    if (this.autoFinishClose) this.finishClose();
+  }
+
+  public finishClose(code = this.pendingCloseCode): void {
     this.emit("close", { code });
   }
 }
+
+// Keep cancelled callbacks available so tests can deliver already-queued stale work.
+function connectionHarness(jitter = 0) {
+  let nextId = 1;
+  let ticketCalls = 0;
+  const sockets: MockWebSocket[] = [];
+  const timeouts = new Map<number, { callback: () => void; delay: number }>();
+  const intervals = new Map<number, () => void>();
+  const clearedIntervals: number[] = [];
+  const session = new TerminalConnectionSession({
+    sessionId: "async-close-session",
+    queue: new XtermOperationQueue(),
+    createTicket: async () => { ticketCalls++; return { ticket: "ticket" }; },
+    createWebSocket: (url, protocols) => {
+      const socket = new MockWebSocket(url, protocols);
+      socket.autoFinishClose = false;
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+    setTimeoutFn: (callback, delay) => {
+      const id = nextId++;
+      timeouts.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeoutFn: (id) => { timeouts.delete(id); },
+    setIntervalFn: (callback) => {
+      const id = nextId++;
+      intervals.set(id, callback);
+      return id;
+    },
+    clearIntervalFn: (id) => { if (id !== undefined) clearedIntervals.push(id); },
+    randomJitterFn: () => jitter,
+    callbacks: {
+      onConnectedChange: () => {},
+      onError: () => {},
+      writeTerminal: async () => {},
+      resetTerminal: () => {},
+      resizeTerminal: () => {}
+    }
+  });
+  return {
+    session, sockets, timeouts, intervals, clearedIntervals,
+    get ticketCalls() { return ticketCalls; },
+    async fireRetry(delay = 1000 + jitter) {
+      assert.equal(timeouts.size, 1, "exactly one retry timer");
+      const [id, timer] = [...timeouts][0];
+      assert.equal(timer.delay, delay);
+      timeouts.delete(id);
+      await timer.callback();
+    }
+  };
+}
+
+function emitGap(socket: MockWebSocket): void {
+  socket.emit("message", { data: JSON.stringify({
+    type: "sync_start", syncId: "gap-sync", baseSeq: 0, cols: 80, rows: 24, control: "controller"
+  }) });
+  socket.emit("message", { data: JSON.stringify({ type: "output", seq: 5, data: "gap" }) });
+}
+
+test("RP8: async CLOSING blocks a new socket until close owns the retry", async (t) => {
+  const h = connectionHarness();
+  t.after(() => h.session.dispose());
+  await h.session.connect();
+  const first = h.sockets[0];
+  await h.session.connect();
+  assert.equal(h.ticketCalls, 1, "CONNECTING blocks duplicate tickets");
+  first.emit("open");
+  await h.session.connect();
+  assert.equal(h.sockets.length, 1, "OPEN blocks duplicate sockets");
+  emitGap(first);
+  assert.equal(first.readyState, 2);
+  assert.equal(h.session.connected, false);
+  await h.session.connect();
+  assert.equal(h.sockets.length, 1, "CLOSING blocks early reconnect");
+  assert.equal(h.session.reconnectManager.getAttempt(), 0);
+  assert.equal(h.timeouts.size, 0, "gap does not schedule retry");
+  first.finishClose(1006);
+  assert.equal(h.session.reconnectManager.getAttempt(), 1);
+  assert.equal(h.sockets.length, 1);
+  await h.fireRetry();
+  assert.equal(h.sockets.length, 2);
+  assert.equal(h.ticketCalls, 2);
+});
+
+test("RP9: stale close cleans only its own heartbeat", async (t) => {
+  const h = connectionHarness();
+  t.after(() => h.session.dispose());
+  await h.session.connect();
+  const first = h.sockets[0];
+  first.emit("open");
+  const [heartbeat1] = h.intervals.keys();
+  first.close();
+  first.finishClose(1006);
+  await h.fireRetry();
+  const second = h.sockets[1];
+  second.emit("open");
+  const heartbeat2 = [...h.intervals.keys()][1];
+  first.emit("close", { code: 1006 });
+  assert.ok(h.clearedIntervals.includes(heartbeat1));
+  assert.ok(!h.clearedIntervals.includes(heartbeat2), "old close must not clear H2");
+  assert.equal(second.readyState, 1);
+  assert.equal(h.session.reconnectManager.getAttempt(), 1);
+  assert.equal(h.timeouts.size, 0);
+});
+
+test("RP10: queued stale heartbeat cannot ping the new socket", async (t) => {
+  const h = connectionHarness();
+  t.after(() => h.session.dispose());
+  await h.session.connect();
+  const first = h.sockets[0];
+  first.emit("open");
+  const [heartbeat1] = h.intervals.values();
+  first.close();
+  first.finishClose(1006);
+  await h.fireRetry();
+  const second = h.sockets[1];
+  second.emit("open");
+  heartbeat1();
+  assert.deepEqual(second.sent, [], "HB1 cannot send through socket2");
+  [...h.intervals.values()][1]();
+  assert.deepEqual(second.sent, [JSON.stringify({ type: "ping" })]);
+});
+
+test("RP11: resume cannot bypass closing or scheduled backoff", async (t) => {
+  const h = connectionHarness(125);
+  t.after(() => h.session.dispose());
+  await h.session.connect();
+  const first = h.sockets[0];
+  first.emit("open");
+  first.close();
+  for (let i = 0; i < 3; i++) await h.session.connect();
+  assert.equal(h.sockets.length, 1);
+  assert.equal(h.ticketCalls, 1);
+  assert.equal(h.timeouts.size, 0);
+  first.finishClose(1006);
+  for (let i = 0; i < 3; i++) await h.session.connect();
+  assert.equal(h.sockets.length, 1, "resume after close must also respect backoff");
+  assert.equal(h.ticketCalls, 1);
+  assert.equal(h.session.reconnectManager.getAttempt(), 1);
+  await h.fireRetry();
+  assert.equal(h.sockets.length, 2);
+});
+
+test("RP12: queued open timeout cannot close an opened or newer socket", async (t) => {
+  const h = connectionHarness();
+  t.after(() => h.session.dispose());
+  await h.session.connect();
+  const first = h.sockets[0];
+  const timeout1 = [...h.timeouts.values()][0].callback;
+  first.emit("open");
+  timeout1();
+  assert.equal(first.readyState, 1, "cancelled opening timeout cannot close an open socket");
+  first.close();
+  first.finishClose(1006);
+  await h.fireRetry();
+  const second = h.sockets[1];
+  second.emit("open");
+  timeout1();
+  assert.equal(second.readyState, 1);
+  assert.equal(h.session.reconnectManager.getAttempt(), 1);
+});
+
+test("RP13: manual reconnect is allowed only after the previous attempt closes", async (t) => {
+  const h = connectionHarness();
+  t.after(() => h.session.dispose());
+  await h.session.connect();
+  const first = h.sockets[0];
+  h.session.manualReconnect();
+  first.emit("open");
+  h.session.manualReconnect();
+  first.close();
+  h.session.manualReconnect();
+  await Promise.resolve();
+  assert.equal(h.ticketCalls, 1, "manual retry cannot overlap CONNECTING/OPEN/CLOSING");
+  first.finishClose(1006);
+  const staleRetry = [...h.timeouts.values()][0].callback;
+  h.session.manualReconnect();
+  await Promise.resolve();
+  const second = h.sockets[1];
+  second.emit("open");
+  staleRetry();
+  await Promise.resolve();
+  assert.equal(h.sockets.length, 2);
+  assert.equal(h.session.reconnectManager.getAttempt(), 0);
+  assert.equal(h.timeouts.size, 0);
+});
+
+test("RP14: dispose cancels attempt timers and invalidates queued callbacks", async () => {
+  const h = connectionHarness();
+  await h.session.connect();
+  const openingTimeout = [...h.timeouts.values()][0].callback;
+  h.session.dispose();
+  assert.equal(h.timeouts.size, 0, "dispose cancels open timeout before async close arrives");
+  openingTimeout();
+  h.sockets[0].finishClose(1006);
+  assert.equal(h.timeouts.size, 0);
+  assert.equal(h.session.reconnectManager.getAttempt(), 0);
+  await h.session.connect();
+  assert.equal(h.sockets.length, 1);
+  h.session.manualReconnect();
+  await Promise.resolve();
+  assert.equal(h.sockets.length, 1, "disposed sessions cannot be revived by queued UI callbacks");
+});
 
 test("RP1: TerminalPane production imports and wires ReconnectManager and TerminalConnectionSession", async () => {
   const terminalPaneContent = await fs.promises.readFile(
@@ -350,7 +562,7 @@ test("RP4: close 4004 stops retry immediately with onSessionMissing", async () =
   assert.equal(timerScheduled, false);
 });
 
-test("RP5: closed-socket snapshot callback cannot reconnect UI/reset retry", async () => {
+test("RP5: closed-socket snapshot callback cannot reconnect UI/reset retry", async (t) => {
   let activeSocket: MockWebSocket | undefined;
   const queue = new XtermOperationQueue();
   let connectedState = false;
@@ -390,6 +602,7 @@ test("RP5: closed-socket snapshot callback cannot reconnect UI/reset retry", asy
     }
   });
 
+  t.after(() => session.dispose());
   await session.connect();
   activeSocket!.emit("open");
 
@@ -470,7 +683,7 @@ test("RP5: closed-socket snapshot callback cannot reconnect UI/reset retry", asy
   assert.equal(connectedState, true);
 });
 
-test("RP6: gap invalidates old attempt, late callbacks cannot affect new socket", async () => {
+test("RP6: gap invalidates old attempt, late callbacks cannot affect new socket", async (t) => {
   let socket1: MockWebSocket | undefined;
   let socket2: MockWebSocket | undefined;
   let socketCount = 0;
@@ -519,6 +732,7 @@ test("RP6: gap invalidates old attempt, late callbacks cannot affect new socket"
     }
   });
 
+  t.after(() => session.dispose());
   await session.connect();
   assert.ok(socket1);
   socket1!.emit("open");

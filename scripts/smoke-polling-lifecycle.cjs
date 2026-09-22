@@ -102,6 +102,9 @@ async function main() {
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
+  const base = `http://127.0.0.1:${server.address().port}`;
+  assert.equal((await fetch(base)).status, 200, "fixture HTTP health");
+  console.log(JSON.stringify({ fixture: base, pid: process.pid }));
 
   const puppeteer = resolvePuppeteer();
   let browser;
@@ -114,8 +117,21 @@ async function main() {
     const page = await browser.newPage();
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    await page.goto(`http://127.0.0.1:${server.address().port}`);
+    await page.goto(base);
     await page.evaluate(installPollingApi);
+    // Observe the real five-second timers without replacing browser scheduling.
+    await page.evaluate(() => {
+      const nativeSetTimeout = window.setTimeout.bind(window);
+      window.__periodicTimers = { scheduled: 0, fired: 0 };
+      window.setTimeout = (callback, delay, ...args) => {
+        if (delay !== 5000 || typeof callback !== "function") return nativeSetTimeout(callback, delay, ...args);
+        window.__periodicTimers.scheduled++;
+        return nativeSetTimeout(() => {
+          window.__periodicTimers.fired++;
+          callback(...args);
+        }, delay);
+      };
+    });
     await page.addScriptTag({ type: "module", content: result.outputFiles[0].text });
     await page.waitForFunction(() => Boolean(window.__pollingProbe));
 
@@ -143,8 +159,26 @@ async function main() {
     await page.waitForFunction(() => window.__pollingApi.requests >= 4, { timeout: 7500 });
     assert.equal(await page.evaluate(() => window.__pollingProbe.activeSessionId), "11111111-1111-4111-8111-111111111111");
     assert.equal(await page.evaluate(() => window.__pollingApi.maxInFlight), 1, "the periodic poll remains single-flight");
+
+    // Keep the in-memory API fixture available offline: a scheduler bug must be
+    // observed as an extra API invocation, not concealed by a failed HTTP request.
+    await page.setOfflineMode(true);
+    assert.equal(await page.evaluate(() => navigator.onLine), false, "Chromium reports offline");
+    const offline = await page.evaluate(() => ({ requests: window.__pollingApi.requests, ...window.__periodicTimers }));
+    await page.waitForFunction((fired) => window.__periodicTimers.fired > fired, { timeout: 7500, polling: 50 }, offline.fired);
+    assert.equal(await page.evaluate(() => window.__pollingApi.requests), offline.requests, "pending poll cannot call the API offline");
+    assert.equal(await page.evaluate(() => window.__periodicTimers.scheduled), offline.scheduled, "offline callback does not rearm polling");
+
+    await page.setOfflineMode(false);
+    await page.waitForFunction((count) => window.__pollingApi.requests > count, { timeout: 3000 }, offline.requests);
+    assert.equal(await page.evaluate(() => navigator.onLine), true);
+    assert.equal(await page.evaluate(() => window.__pollingApi.requests), offline.requests + 1, "native online event refreshes exactly once");
+    assert.equal(await page.evaluate(() => window.__periodicTimers.scheduled), offline.scheduled + 1, "online refresh schedules one periodic timer");
+    await page.waitForFunction((count) => window.__pollingApi.requests > count + 1, { timeout: 7500 }, offline.requests);
+    assert.equal(await page.evaluate(() => window.__pollingApi.requests), offline.requests + 2, "five-second polling resumes");
+    assert.equal(await page.evaluate(() => window.__pollingApi.maxInFlight), 1);
     assert.deepEqual(errors, [], "no page errors or unhandled rejections");
-    console.log(JSON.stringify({ passed: true, requests: await page.evaluate(() => window.__pollingApi.requests) }));
+    console.log(JSON.stringify({ passed: true, offlinePolling: true, requests: await page.evaluate(() => window.__pollingApi.requests) }));
   } finally {
     await browser?.close();
     await new Promise((resolve) => server.close(resolve));

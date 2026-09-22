@@ -42,6 +42,94 @@ class FakeClock {
   }
 }
 
+for (const [id, blockedState] of [["P11", "hidden"], ["P12", "offline"], ["P14", "unauthenticated"], ["P15", "inactive"]] as const) {
+  test(`${id}: scheduled periodic timer rechecks ${blockedState} at execution and resumes once`, async (t) => {
+    const clock = new FakeClock();
+    let visible = true;
+    let online = true;
+    let authenticated = true;
+    let active = true;
+    let fetchCalls = 0;
+    const scheduler = new SessionPollingScheduler({
+      fetchSessions: async () => { fetchCalls++; },
+      hasActiveSession: () => active,
+      isAuthenticated: () => authenticated,
+      isVisible: () => visible,
+      isOnline: () => online,
+      setTimeoutFn: clock.setTimeout,
+      clearTimeoutFn: clock.clearTimeout,
+      randomJitterFn: () => 0
+    });
+    t.after(() => scheduler.stop());
+    scheduler.start();
+    await scheduler.triggerImmediateRefresh();
+    assert.equal(fetchCalls, 1);
+    assert.equal(clock.getNextDueDelay(), 5000);
+    if (blockedState === "hidden") visible = false;
+    if (blockedState === "offline") online = false;
+    if (blockedState === "unauthenticated") authenticated = false;
+    if (blockedState === "inactive") active = false;
+    await clock.advance(5000);
+    assert.equal(fetchCalls, 1, "scheduled callback must not fetch after runtime state changes");
+    assert.equal(clock.getPendingCount(), 0);
+    assert.equal(scheduler.hasScheduledTimer(), false);
+    assert.equal(scheduler.retryCount, 0);
+    assert.equal(scheduler.lastAttemptFailed, false);
+    await clock.advance(30000);
+    assert.equal(fetchCalls, 1, "no hidden/offline timer loop");
+    visible = online = authenticated = active = true;
+    await scheduler.triggerImmediateRefresh();
+    assert.equal(fetchCalls, 2, "one explicit refresh on restore");
+    assert.equal(clock.getPendingCount(), 1);
+    assert.equal(clock.getNextDueDelay(), 5000);
+    await clock.advance(5000);
+    assert.equal(fetchCalls, 3, "periodic polling resumes");
+  });
+}
+
+test("P13: offline backoff timer preserves failure state until online refresh", async (t) => {
+  const clock = new FakeClock();
+  let online = true;
+  let shouldFail = true;
+  let fetchCalls = 0;
+  const scheduler = new SessionPollingScheduler({
+    fetchSessions: async () => {
+      fetchCalls++;
+      if (shouldFail) throw new Error("network failed");
+    },
+    hasActiveSession: () => true,
+    isAuthenticated: () => true,
+    isVisible: () => true,
+    isOnline: () => online,
+    setTimeoutFn: clock.setTimeout,
+    clearTimeoutFn: clock.clearTimeout,
+    randomJitterFn: () => 0
+  });
+  t.after(() => scheduler.stop());
+  scheduler.start();
+  await scheduler.executeFetch();
+  assert.equal(clock.getNextDueDelay(), 1000);
+  assert.equal(scheduler.retryCount, 1);
+  assert.equal(scheduler.lastAttemptFailed, true);
+  online = false;
+  await clock.advance(1000);
+  assert.equal(fetchCalls, 1);
+  assert.equal(scheduler.retryCount, 1);
+  assert.equal(scheduler.lastAttemptFailed, true);
+  assert.equal(clock.getPendingCount(), 0);
+  assert.equal(scheduler.hasScheduledTimer(), false);
+  await clock.advance(30000);
+  assert.equal(fetchCalls, 1);
+  online = true;
+  shouldFail = false;
+  await scheduler.triggerImmediateRefresh();
+  assert.equal(fetchCalls, 2);
+  assert.equal(scheduler.retryCount, 0);
+  assert.equal(scheduler.lastAttemptFailed, false);
+  assert.equal(clock.getPendingCount(), 1);
+  assert.equal(clock.getNextDueDelay(), 5000);
+});
+
 test("P3: Errors follow base delay: 1 -> 1s, 2 -> 2s, 3 -> 4s, 4 -> 8s, 5+ -> 15s (helper and scheduler)", async () => {
   // 1. Check pure helper base delay and jitter bounds
   const expectedBase = [1000, 2000, 4000, 8000, 15000];
@@ -324,6 +412,8 @@ test("P7: First GET error retries with backoff even without activeSession; resto
     },
     hasActiveSession: () => true,
     isAuthenticated: () => true,
+    isVisible: () => true,
+    isOnline: () => true,
     setTimeoutFn: clock.setTimeout,
     clearTimeoutFn: clock.clearTimeout
   });

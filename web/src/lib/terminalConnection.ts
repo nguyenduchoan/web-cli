@@ -4,6 +4,9 @@ import { TerminalSyncController } from "./terminalSync.js";
 import { XtermOperationQueue } from "./xtermOperationQueue.js";
 import type { ServerMessageV2, Session } from "./types.js";
 
+const WS_CONNECTING = 0;
+const WS_OPEN = 1;
+
 export type TerminalConnectionCallbacks = {
   onConnectedChange: (connected: boolean, control?: "controller" | "viewer") => void;
   onSessionUpdate?: (session: Session, registryRevision?: number, serverEpoch?: string) => void;
@@ -60,7 +63,8 @@ export class TerminalConnectionSession {
   public role: "controller" | "viewer" = "viewer";
 
   private retryTimer: any = undefined;
-  private heartbeatTimer: any = undefined;
+  private cleanupCurrentAttempt: (() => void) | undefined;
+  private disposed = false;
   private lastMessageTime = Date.now();
 
   constructor(options: TerminalConnectionOptions) {
@@ -104,6 +108,8 @@ export class TerminalConnectionSession {
   }
 
   public manualReconnect(): void {
+    // Manual retry is only valid once the previous attempt has released its socket.
+    if (this.disposed || this.connecting || this.ws) return;
     this.stopped = false;
     this.reconnectManager.onManualReconnect();
     this.clearTimeoutFn(this.retryTimer);
@@ -112,7 +118,9 @@ export class TerminalConnectionSession {
   }
 
   public async connect(): Promise<void> {
-    if (this.stopped || this.connecting || this.ws?.readyState === 1) return;
+    // The close handler releases ownership, including CLOSED before its event is delivered.
+    // Browser resume events must also respect an already scheduled backoff.
+    if (this.stopped || this.connecting || this.ws || this.retryTimer !== undefined) return;
     this.connecting = true;
     this.setConnected(false);
 
@@ -127,7 +135,23 @@ export class TerminalConnectionSession {
       const ws = this.createWebSocket(buildWsUrl(this.sessionId), ["web-cli", `ticket.${ticket}`]);
       this.ws = ws;
 
-      const openTimeout = this.setTimeoutFn(() => {
+      let heartbeatTimer: any = undefined;
+      let openTimeout: any = undefined;
+      const ownsAttempt = () =>
+        !this.stopped && this.attemptGeneration === currentAttempt && this.ws === ws;
+      const clearOpenTimeout = () => {
+        if (openTimeout !== undefined) this.clearTimeoutFn(openTimeout);
+        openTimeout = undefined;
+      };
+      const cleanupAttempt = () => {
+        clearOpenTimeout();
+        if (heartbeatTimer !== undefined) this.clearIntervalFn(heartbeatTimer);
+        heartbeatTimer = undefined;
+        if (this.cleanupCurrentAttempt === cleanupAttempt) this.cleanupCurrentAttempt = undefined;
+      };
+      this.cleanupCurrentAttempt = cleanupAttempt;
+      openTimeout = this.setTimeoutFn(() => {
+        if (!ownsAttempt() || openTimeout === undefined || ws.readyState !== WS_CONNECTING) return;
         try {
           ws.close();
         } catch {}
@@ -185,8 +209,8 @@ export class TerminalConnectionSession {
       this.currentSyncCtrl = syncCtrl;
 
       ws.addEventListener("open", () => {
-        this.clearTimeoutFn(openTimeout);
-        if (this.stopped || this.attemptGeneration !== currentAttempt || this.ws !== ws) {
+        clearOpenTimeout();
+        if (!ownsAttempt()) {
           try {
             ws.close();
           } catch {}
@@ -196,14 +220,15 @@ export class TerminalConnectionSession {
         this.connecting = false;
         this.lastMessageTime = Date.now();
 
-        this.clearIntervalFn(this.heartbeatTimer);
-        this.heartbeatTimer = this.setIntervalFn(() => {
+        if (heartbeatTimer !== undefined) this.clearIntervalFn(heartbeatTimer);
+        heartbeatTimer = this.setIntervalFn(() => {
+          if (!ownsAttempt() || ws.readyState !== WS_OPEN) return;
           if (Date.now() - this.lastMessageTime > 35_000) {
             try {
               ws.close();
             } catch {}
           } else {
-            this.send({ type: "ping" });
+            ws.send(JSON.stringify({ type: "ping" }));
           }
         }, 15_000);
       });
@@ -315,8 +340,7 @@ export class TerminalConnectionSession {
       });
 
       ws.addEventListener("close", (event) => {
-        this.clearTimeoutFn(openTimeout);
-        this.clearIntervalFn(this.heartbeatTimer);
+        cleanupAttempt();
         if (this.ws !== ws) return;
 
         this.ws = undefined;
@@ -346,9 +370,7 @@ export class TerminalConnectionSession {
         }
 
         const jitter = this.randomJitterFn();
-        this.retryTimer = this.setTimeoutFn(() => {
-          void this.connect();
-        }, decision.delayMs + jitter);
+        this.scheduleRetry(decision.delayMs + jitter);
       });
 
       ws.addEventListener("error", () => {
@@ -388,18 +410,28 @@ export class TerminalConnectionSession {
 
       this.callbacks.onError(error instanceof Error ? error.message : "Mất kết nối.");
       const jitter = this.randomJitterFn();
-      this.retryTimer = this.setTimeoutFn(() => {
-        void this.connect();
-      }, decision.delayMs + jitter);
+      this.scheduleRetry(decision.delayMs + jitter);
     }
   }
 
+  private scheduleRetry(delayMs: number): void {
+    const generation = this.attemptGeneration;
+    const timer = this.setTimeoutFn(() => {
+      if (this.stopped || this.attemptGeneration !== generation || this.retryTimer !== timer) return;
+      this.retryTimer = undefined;
+      void this.connect();
+    }, delayMs);
+    this.retryTimer = timer;
+  }
+
   public dispose(): void {
+    this.disposed = true;
     this.stopped = true;
     this.attemptGeneration += 1;
     this.currentSyncCtrl?.invalidate();
     this.clearTimeoutFn(this.retryTimer);
-    this.clearIntervalFn(this.heartbeatTimer);
+    this.retryTimer = undefined;
+    this.cleanupCurrentAttempt?.();
     if (this.ws) {
       try {
         this.ws.close();

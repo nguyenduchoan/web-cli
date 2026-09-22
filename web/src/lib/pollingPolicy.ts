@@ -129,7 +129,11 @@ export class SessionPollingScheduler {
   }
 
   public async executeFetch(): Promise<void> {
-    if (this.stopped || this.isFetching) return;
+    // A scheduled timer may outlive the visible/online/authenticated state that created it.
+    if (
+      this.stopped || this.isFetching || !this.isAuthenticatedFn() ||
+      !this.isVisibleFn() || !this.isOnlineFn()
+    ) return;
     this.isFetching = true;
     const currentGen = this.authGeneration;
 
@@ -175,6 +179,8 @@ export class SessionPollingScheduler {
 
     this.timerId = this.setTimeoutFn(() => {
       this.timerId = undefined;
+      // Explicit refreshes and error retries still work without an active session.
+      if (!this.lastAttemptFailed && !this.hasActiveSessionFn()) return;
       void this.executeFetch();
     }, delay);
 
