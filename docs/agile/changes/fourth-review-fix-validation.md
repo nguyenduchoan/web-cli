@@ -85,5 +85,9 @@ Lệnh RED chạy trong fixture, GREEN chạy tại repository:
 
 ## Commit và remote CI
 
-- Local validation hoàn tất. Commit/push và kết quả GitHub Actions của implementation: đang chờ.
-- Chưa đánh dấu toàn bộ Definition of Done cho đến khi cả Build, Check & Test và Browser Smoke Tests của commit fix đều xanh.
+- Implementation commit: [`98fbce45184bddc96b159529b05ba33a7a753643`](https://github.com/nguyenduchoan/web-cli/commit/98fbce45184bddc96b159529b05ba33a7a753643), `fix: close remaining reconnect and polling races`, đã push `origin/main`.
+- Remote CI: [run 35685586097](https://github.com/nguyenduchoan/web-cli/actions/runs/35685586097), đúng `head_sha` trên, `completed / success`.
+- [Build, Check & Test](https://github.com/nguyenduchoan/web-cli/actions/runs/35685586097/job/106611578845): PASS, gồm typecheck, build, unit/integration tests và whitespace check trên Node 22.
+- [Browser Smoke Tests](https://github.com/nguyenduchoan/web-cli/actions/runs/35685586097/job/106611813946): PASS; multi-session, mobile, push lifecycle và polling lifecycle đều `success`, không skip.
+- Kết quả API lưu local tại `/tmp/web-cli-fourth-ci-35685586097.json`. Sau smoke, xác nhận PID 3259046 không còn port listening.
+- Toàn bộ Definition of Done của fourth-review plan đạt trên implementation commit. Cập nhật tài liệu sau CI chỉ ghi bằng chứng và checklist, không thay code/test. Không có hạng mục implementation deferred; giới hạn coverage hidden-browser/load-test và trạng thái chưa deploy đã nêu ở trên.

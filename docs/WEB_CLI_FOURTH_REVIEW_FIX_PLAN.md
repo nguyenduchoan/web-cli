@@ -4,6 +4,7 @@
 > **Baseline commit:** `3026b70a8d855b604ae0db3b83956c43c7b4d706`  
 > **Baseline message:** `fix: implement third review fix plan (phases 1-3)`  
 > **Purpose:** xử lý các race còn lại sau khi third-review implementation đã sửa đúng stale polling closure, single-flight session fetch, same-session xterm reconnect barrier và push lifecycle.
+> **Implementation status (2026-09-22):** Hoàn tất trên commit `98fbce45184bddc96b159529b05ba33a7a753643`; local validation và [CI run 35685586097](https://github.com/nguyenduchoan/web-cli/actions/runs/35685586097) đều PASS. Bằng chứng RED/GREEN và giới hạn coverage: [fourth-review-fix-validation.md](agile/changes/fourth-review-fix-validation.md).
 
 ---
 
@@ -908,39 +909,39 @@ và ghi run URL vào validation.
 
 Chỉ hoàn tất khi:
 
-- [ ] `connect()` không tạo socket mới khi current socket CONNECTING.
-- [ ] `connect()` không tạo socket mới khi current socket OPEN.
-- [ ] `connect()` không tạo socket mới khi current socket CLOSING.
-- [ ] Retryable socket failure consume đúng một reconnect attempt.
-- [ ] focus/online/visibility resume không bypass backoff.
-- [ ] Old close callback không clear heartbeat attempt mới.
-- [ ] Old heartbeat callback không gửi ping qua socket mới.
-- [ ] Old open timeout không close socket mới.
-- [ ] Không có parallel WebSocket attempt ngoài lifecycle được thiết kế.
-- [ ] RP8 PASS.
-- [ ] RP9 PASS.
-- [ ] RP10 PASS.
-- [ ] RP11 PASS.
-- [ ] Timer periodic fire khi hidden không fetch.
-- [ ] Timer periodic fire khi offline không fetch.
-- [ ] Backoff timer fire khi offline không fetch/tight-loop.
-- [ ] visible/online restore thực hiện đúng một immediate refresh.
-- [ ] Polling sau restore quay lại 5s khi có active session.
-- [ ] P11 PASS.
-- [ ] P12 PASS.
-- [ ] P13 PASS.
-- [ ] Existing P3-P10 vẫn PASS.
-- [ ] Existing RP1-RP7 vẫn PASS.
-- [ ] Existing XQ/OR tests vẫn PASS.
-- [ ] Push tests/smoke vẫn PASS.
-- [ ] Multi-session smoke PASS.
-- [ ] Mobile smoke PASS.
-- [ ] `npm run check` PASS.
-- [ ] `npm run build` PASS.
-- [ ] `npm test` PASS.
-- [ ] `git diff --check` PASS.
-- [ ] Có `fourth-review-fix-validation.md`.
-- [ ] Remote CI sau push PASS.
+- [x] `connect()` không tạo socket mới khi current socket CONNECTING.
+- [x] `connect()` không tạo socket mới khi current socket OPEN.
+- [x] `connect()` không tạo socket mới khi current socket CLOSING.
+- [x] Retryable socket failure consume đúng một reconnect attempt.
+- [x] focus/online/visibility resume không bypass backoff.
+- [x] Old close callback không clear heartbeat attempt mới.
+- [x] Old heartbeat callback không gửi ping qua socket mới.
+- [x] Old open timeout không close socket mới.
+- [x] Không có parallel WebSocket attempt ngoài lifecycle được thiết kế.
+- [x] RP8 PASS.
+- [x] RP9 PASS.
+- [x] RP10 PASS.
+- [x] RP11 PASS.
+- [x] Timer periodic fire khi hidden không fetch.
+- [x] Timer periodic fire khi offline không fetch.
+- [x] Backoff timer fire khi offline không fetch/tight-loop.
+- [x] visible/online restore thực hiện đúng một immediate refresh.
+- [x] Polling sau restore quay lại 5s khi có active session.
+- [x] P11 PASS.
+- [x] P12 PASS.
+- [x] P13 PASS.
+- [x] Existing P3-P10 vẫn PASS.
+- [x] Existing RP1-RP7 vẫn PASS.
+- [x] Existing XQ/OR tests vẫn PASS.
+- [x] Push tests/smoke vẫn PASS.
+- [x] Multi-session smoke PASS.
+- [x] Mobile smoke PASS.
+- [x] `npm run check` PASS.
+- [x] `npm run build` PASS.
+- [x] `npm test` PASS.
+- [x] `git diff --check` PASS.
+- [x] Có `fourth-review-fix-validation.md`.
+- [x] Remote CI sau push PASS.
 
 ---
 
